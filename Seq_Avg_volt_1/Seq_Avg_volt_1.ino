@@ -20,10 +20,10 @@ void loop() {
     double Vactual = sensorValue;
     sum += sensorValue;
     sumSqares += sensorValue * sensorValue;
-    Serial.print("V Sequential:");
+    /*Serial.print("V Sequential:");
     Serial.print(Vactual);
     Serial.print("  count:");
-    Serial.println(i);
+    Serial.println(i);*/
     i = i + 1;
   }
   float mean = sum / 100;
@@ -33,7 +33,6 @@ void loop() {
     Serial.println(mean);
     Serial.print("Sdev (seq): ");
     Serial.println(dev);
-  delay(100);
   sum = 0;
   sumSqares = 0;
   unsigned long totalAvgTime = 0;
@@ -48,12 +47,17 @@ void loop() {
     unsigned long endTime = micros();
     totalAvgTime += (endTime - startTime);
     Vavg = (Vavg / 1000);
+
+    float instVoltage = Vavg * (Vref / 1023.0);
+    int instPwm = constrain((int)(instVoltage / Vref * 255.0), 0, 255);
+    analogWrite(ledPin, instPwm);
+
     sum += Vavg;
     sumSqares += Vavg * Vavg;
-    Serial.print("V average:");
+    /*Serial.print("V average:");
     Serial.print(Vavg);
     Serial.print("  count:");
-    Serial.println(j);
+    Serial.println(j);*/
     j = j + 1;
   }
   mean = sum / 100;
@@ -71,15 +75,11 @@ void loop() {
   Serial.println(conversionsPerSecond);
 
   float voltage = mean * (Vref / 1023.0);
-  int pwmValue = (int)(voltage / Vref * 255.0);
-  pwmValue = constrain(pwmValue, 0, 255);
-  analogWrite(ledPin, pwmValue);
+  int pwmValue = constrain((int)(voltage / Vref * 255.0), 0, 255);
   Serial.print("Voltage (ave): ");
   Serial.println(voltage);
   Serial.print("PWM value: ");
   Serial.println(pwmValue);
-
-  delay(10000);
 }
 //nmax = 1023
 //nmid = 511.5
