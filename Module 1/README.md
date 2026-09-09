@@ -12,7 +12,7 @@ Module 1 of PHY39A.
 - [Blink/Blink.ino](Blink/Blink.ino): A modified blink sketch that controls an
 	LED on digital pin 9 and switches it on and off with 10 millisecond delays.
 - [Blink/Blink.txt](Blink/Blink.txt): Short description of the Blink sketch.
-- [AnalogReadSerial1/AnalogReadSerial1.ino](AnalogReadSerial1/AnalogReadSerial1.ino):
+- [AnalogReadSerial1/AnalogReadSerial1.ino](AnalogReadSerial1/AnalogReadSerial1.ino)
 	Reads the voltage level from analog pin A0 and prints the raw 10-bit ADC
 	reading to the Serial Monitor at 9600 baud.
 - [Seq_Avg_volt_1/Seq_Avg_volt_1.ino](Seq_Avg_volt_1/Seq_Avg_volt_1.ino):

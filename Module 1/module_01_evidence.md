@@ -32,8 +32,9 @@ The results from the ADC digitization of our input voltage include a maximum ADC
 
 ![Transition](Images/Transition.png)
 
-## Averaging Results
-
+## Measured Time for Analog Read
 
 ## Oscilloscope Results
+
+![Oscilloscope](Images/Oscilloscope.jpg)
 
