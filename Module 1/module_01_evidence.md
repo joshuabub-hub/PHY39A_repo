@@ -7,11 +7,13 @@
 
 ## Date
 
-09/02/2026
+09/14/2026
 
-## URL
+## URL and Full Commit Hash
 
 https://github.com/joshuabub-hub/PHY39A_repo.git
+
+Commit hash: b84150a9463091e4a031e2f1127a213925e48675
 
 ## Apparatus
 
