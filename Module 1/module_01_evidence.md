@@ -32,6 +32,11 @@ The results from the ADC digitization of our input voltage include a maximum ADC
 
 ![Transition](Images/Transition.png)
 
+| Potentiometer block | Reported points | Readings averaged per point *N* | Mean voltage | Sample standard deviation *s* | *s* / *s*₁ measured | *s* / *s*₁ predicted |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Unaveraged |  |  |  |  |  |  |
+| Long average |  |  |  |  |  |  |
+
 ## Measured Time for Analog Read
 
 Average time for 1000 samples: 121853 µs
