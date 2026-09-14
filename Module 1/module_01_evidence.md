@@ -11,9 +11,9 @@
 
 ## URL and Full Commit Hash
 
-https://github.com/joshuabub-hub/PHY39A_repo.git
+Repository: https://github.com/joshuabub-hub/PHY39A_repo.git
 
-Commit hash: b84150a9463091e4a031e2f1127a213925e48675
+Commit: https://github.com/joshuabub-hub/PHY39A_repo/commit/2235ce6bba96bb18e5f614c120812312ae4fc423
 
 ## Apparatus
 
