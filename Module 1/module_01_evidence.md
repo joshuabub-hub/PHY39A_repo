@@ -85,3 +85,14 @@ Arduino reported that we were performing the 1000 sample conversions in roughly 
 | Frequency | 50 Hz |
 
 The oscilloscope shows all of the information about the PWM waveform. The Arduino Serial Monitor/Plotter only displays our ADC-converted voltage readings. To find the PWM frequency, duty cycle, and maximum/minimum voltages, we need the oscilloscope results. The oscilloscope reads raw, continuous electrical data, while the Arduino is reading, converting, and printing on some discrete timescale dictated by the sketch.
+
+## Analog Input
+
+Arduinos analog input measures the incoming voltage on a range of 0V - 5V, as opposed to digital input which just measures if it is 0V or if it is 5V. It does this by using an Analog to Digital Converter (ADC) which maps the 5V range of the arduino into 1024 smaller steps, and then returns the step that is closest to the voltage. For example if the analog pin recived 2.5V which is the midpoint of the range it would read out 512 as that is the midpoint of the 1024 range. One of the consiquences of this is that it takes more time to read out an analog signal, taking about 100µs per reading whereas digital can go much faster.
+
+##  PWM Output
+
+Arduinos can not output a true analog signal, they get around it by using a process known as Pulse Width Modulation (PWM). PWM is when the arduino rapidly cycles the power from 0V to 5V to a specific component much faster than the signal is being read from that component. This causes the observer or sensor to average out the readings and roughly see a component being powered by an analog voltage. The arduino can then vary this voltage by varying the duty cycle, which is the percentage of the time that the component recives 5V. For larger devices, like a motor, the arduino must then use these PWM controls to control another device which can operate at a higher current as the arduino itself cannot supply it. 
+
+PWM is never true analog as if you were to read the voltage at a specific point it would always read near 0 or 5V.
+
