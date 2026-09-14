@@ -32,27 +32,12 @@ The results from the ADC digitization of our input voltage include a maximum ADC
 
 ![Transition](Images/Transition.png)
 
-| Potentiometer block | Reported points | Readings averaged per point *N* | Mean voltage | Sample standard deviation *s* | *s* / *s*₁ measured | *s* / *s*₁ predicted |
-| --- | ---: | ---: | --- | --- | ---: | ---: |
-| Unaveraged |  |  |  |  |  |  |
-| Long average |  |  |  |  |  |  |
+According to the 1/sqrt(1000) prediction, the standard deviation of our averaged voltages should be ~0.03 * the standard deviation of 100 sequential voltages. The standard deviation of our averaged voltages was only 0.5 times smaller than our sequential voltages standard deviation. While this ratio did change a bit as we continued running the sketch, it never dipped below ~0.2, which is less of an improvement then expected, but still significant.
 
 ## Measured Time for Analog Read
 
-Average time for 1000 samples: 121853 µs
-analogread() conversions per second: 8206.6
-
+Arduino reported that we were performing the 1000 sample conversions in roughly 0.12 seconds. Averaging 1000 measurements improves our precision by smoothing the discrete jumps produce by converting the analog voltage signals to digital outputs. This smoothing is essentially a low pass filter, as measurement results that occur faster than the time it takes to average will get blurred out.
 ## Oscilloscope Results
 
 ![Oscilloscope](Images/Oscilloscope.jpg)
 
-## Potentiometer Averaging Results
-
-| Potentiometer block | Reported points | Readings averaged per point *N* | Mean voltage | Sample standard deviation *s* | *s* / *s*₁ measured | *s* / *s*₁ predicted |
-| --- | ---: | ---: | --- | --- | ---: | ---: |
-| Unaveraged | 100 | 1 |  | 0.48(Not mv in pwm steps)mV | 1.000 | 1.000 |
-| Long average | 100 | 1000 |  | 0.2(Not mv in pwm steps)mV |  | 0.0316 |
-
-## Oscilloscope VS Seiral Plotter
-
-## Questions 9 and 10
