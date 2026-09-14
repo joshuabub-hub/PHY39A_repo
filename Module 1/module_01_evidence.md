@@ -34,7 +34,20 @@ The results from the ADC digitization of our input voltage include a maximum ADC
 
 ## Measured Time for Analog Read
 
+Average time for 1000 samples: 121853 µs
+analogread() conversions per second: 8206.6
+
 ## Oscilloscope Results
 
 ![Oscilloscope](Images/Oscilloscope.jpg)
 
+## Potentiometer Averaging Results
+
+| Potentiometer block | Reported points | Readings averaged per point *N* | Mean voltage | Sample standard deviation *s* | *s* / *s*₁ measured | *s* / *s*₁ predicted |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| Unaveraged | 100 | 1 |  | 0.48(Not mv in pwm steps)mV | 1.000 | 1.000 |
+| Long average | 100 | 1000 |  | 0.2(Not mv in pwm steps)mV |  | 0.0316 |
+
+## Oscilloscope VS Seiral Plotter
+
+## Questions 9 and 10
