@@ -37,7 +37,7 @@ TEMPERATURE_AXIS_MAX_C = 50.0
 PWM_MIN = 0
 PWM_MAX = 255
 
-OUTPUT_CSV_FILENAME = "temperature_log.csv"
+OUTPUT_CSV_FILENAME = "data/temperature_log.csv"
 # ---------------------------------------------------------------------------
 
 LINE_PATTERN = re.compile(
