@@ -158,3 +158,19 @@ All of this lives in `serial_plot.py`:
 
 Waveform measurements: square wave, PWM frequency 500 Hz, PWM duty cycle
 0.25, observed on m+, m-, pin 10, and pin 9.
+
+## Manual Testing
+
+Before powering the TEC, use an oscilloscope to confirm that the Arduino is producing the expected PWM waveform. This check helps verify that the H-bridge is receiving the intended signal and reduces the risk of unsafe or unexpected operation.
+
+Also, with the white insulating foam in place over the TEC, the thermal switch should be tested to confirm that it operates correctly at the expected temperature. Verifying the switch in a controlled setup helps prevent future failures and gives a known safety point to check if a fault occurs.
+
+## Questions
+
+- Parts of the GUI code are still unclear
+
+## AI Assistance
+
+AI helped generate much of the Arduino and Python GUI code, but the project still required manual debugging and hardware validation. The sketches were tested on real hardware through the Arduino IDE and serial monitoring, and the README was also refined for clarity and readability.
+
+We can explain the Arduino sketches and the serial communication workflow at a practical level, but deeper questions about the specific implementation details of the Python GUI may require additional code review or direct inspection of the script itself.
