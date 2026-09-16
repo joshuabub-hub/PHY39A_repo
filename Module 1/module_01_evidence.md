@@ -13,8 +13,7 @@
 
 Repository: https://github.com/joshuabub-hub/PHY39A_repo.git
 
-Commit: https://github.com/joshuabub-hub/PHY39A_repo/commit/2235ce6bba96bb18e5f614c120812312ae4fc423
-
+Commit: `a438fe5a65376d66d2ff01b27c197e30411df9a7`
 ## Apparatus
 
 ![Apparatus](Images/Apparatus.jpeg)
