@@ -72,7 +72,7 @@ SETPOINT_MAX_C = TEMPERATURE_AXIS_MAX_C
 
 DEFAULT_KP = 1.0
 KP_MIN = 0.0
-KP_MAX = 50.0
+KP_MAX = 500.0
 
 OUTPUT_CSV_FILENAME = Path(__file__).resolve().parents[1] / "data" / "temperature_log.csv"
 # ---------------------------------------------------------------------------
