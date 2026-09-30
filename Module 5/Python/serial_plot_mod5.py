@@ -72,7 +72,7 @@ SETPOINT_MAX_C = TEMPERATURE_AXIS_MAX_C
 
 DEFAULT_KP = 1.0
 KP_MIN = 0.0
-KP_MAX = 50.0
+KP_MAX = 500.0
 
 OUTPUT_CSV_FILENAME = Path(__file__).resolve().parents[1] / "data" / "temperature_log.csv"
 # ---------------------------------------------------------------------------
@@ -664,5 +664,7 @@ def main():
     sys.exit(app.exec())
 
 
+# Run with:
+#   cd "/Users/joshbub/Documents/PHYS39A_Repo/PHY39A_repo/Module 5" && venv/bin/python Python/serial_plot_mod5.py
 if __name__ == "__main__":
     main()
