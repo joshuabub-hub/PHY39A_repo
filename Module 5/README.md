@@ -96,27 +96,64 @@ or the PWM slamming into 0/255 before going any higher.
 
 ## Gain-tuning log
 
-Setpoint for this sequence is 30.0 °C. Taking ambient as Module 4's
-measured baseline (~26.0 °C at PWM 0 - re-check the live ambient reading
-before each run, since it drifts) puts the starting error at +4.0 °C, so
-the initial direction is HEAT and Module 4's heat susceptibility
-(0.516 °C/PWM) is the one used below. That fixes two reference PWM values
-for this setpoint: the predicted output at the initial `Kp = 1.0` gain
-comes out to **4.0**, and the PWM magnitude needed to fully close a 4.0 °C
-error at steady state (per the heat susceptibility) comes out to
-**~7.75**.
+This is a single continuous run (no restarts) recorded start-to-finish in
+`data/temperature_log.csv`: MANUAL at PWM 0 first, then P Control stepped
+through `Kp = 1.0, 1.5, 2.0, 3.0, 5.0` in order, each held until it reached
+steady state before advancing to the next gain. Ambient, taken as the last
+MANUAL-mode reading before switching to P Control, was **21.42 °C**.
+Setpoint for the whole sequence is 30.0 °C, so the starting error is
++8.58 °C - direction is HEAT, and Module 4's heat susceptibility
+(`χT,h = 0.516 °C/PWM`) is the one used below. That fixes two reference PWM
+values for this setpoint: the predicted output at the initial `Kp = 1.0`
+gain comes out to **8.58**, and the PWM magnitude needed to fully close an
+8.58 °C error at steady state comes out to
 
-The five gains below start at that initial `Kp = 1.0` and climb past the
-~7.75 point, so the run sequence brackets it from both sides before pushing
-further into over-driven territory:
+```
+Prequired ≈ |Tset - Tamb| / χT,h = 8.58 / 0.516 ≈ 16.63 PWM counts
+```
 
-| Kp (PWM/°C) | Predicted P₀ | Required P | Setpoint (°C) | Final Temp (°C) | Steady-State Droop (°C) | Final PWM | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1.0 | 4.0 | 7.75 | 30.0 | 27.7 | 2.3 | 2 | Initial gain (= Pnaught); L < 1 in both directions (see above). Measured from `data/temperature_log.csv`, the MANUAL(PWM 0)->P transition at t≈2063.6 s through t≈2383 s: temperature climbs from ambient and settles into a small limit cycle (mostly PWM 2, occasionally 3, from integer PWM rounding) rather than reaching the 30.0 °C setpoint - the expected residual droop for a below-Prequired proportional gain. |
-| 1.5 | 6.0 | 7.75 | 30.0 | 27.7 | 2.3 | 3 | Below Prequired. Note: not a fresh PWM=0 start - `Kp` was bumped live from 1.0 to 1.5 at t≈2457.5 s while still in P mode, starting from the Kp=1.0 run's settled state (~27.5 °C, PWM≈2) rather than from ambient. Settled (last 60 s through t≈2623 s) at PWM mostly 3, occasionally 4. Droop came out nearly the same as Kp=1.0 - expected, since the predicted droop only drops from ~2.6 °C to ~2.25 °C between these two gains. |
-| 2.0 | 8.0 | 7.75 | 30.0 | 27.9 | 2.1 | 4 | ~ Prequired. `Kp` was stepped 1.5->1.6->...->2.0 while in MANUAL with PWM held at 0, then switched to P at t≈2707.6 s - so this trial does start clean from PWM=0, same as Kp=1.0. Noticeably more oscillation than the lower gains (last 60 s of t≈2882.7 s ranged 27.58-29.62 °C, vs. <1 °C spread at Kp=1.0/1.5) - expected since this gain sits right at Prequired. Droop dropped modestly to 2.1 °C, in line with the predicted ~2.0 °C. |
-| 3.0 | 12.0 | 7.75 | 30.0 | 28.8 | 1.2 | 3-4 | Above Prequired. **Post-restart data**: the script crashed around t≈3000 s (of the prior run) and was restarted, which truncates `data/temperature_log.csv` (opened in `"w"` mode on startup) - only data from after the restart is usable/reflected here. `Kp` was stepped 1.0->...->3.0 in MANUAL with PWM held at 0, then switched to P at t≈13.7 s (restarted clock), so this is a clean PWM=0 start. Starting temperature was already ~28.8-29.0 °C rather than ~27 °C ambient - the rig was still warm from the pre-restart runs, not cold-started - so treat the Predicted P0/Required P reference values (computed from the ~26 °C ambient baseline) as less accurate for this trial. Reached a tight steady band almost immediately (last 60 s through t≈168 s: 28.67-29.00 °C) alternating between PWM 3 and 4. Droop continued the expected downward trend (2.3 -> 2.3 -> 2.1 -> 1.2 °C). |
-| 5.0 | 20.0 | 7.75 | 30.0 | TBD | TBD | TBD | Above Prequired. Previous run at this gain discarded - hardware issue, not a valid closed-loop result. Re-run and refill. |
+The results below were computed directly from `data/temperature_log.csv`:
+each row's Final Temp/Final PWM are the mean over the last 60 s of that
+gain's segment (segments identified by contiguous `mode`/`kp` values), and
+Steady-State Droop is `Setpoint - Final Temp`.
+
+| Kp (PWM/°C) | Predicted P₀ | Required P | Setpoint (°C) | Segment (s) | Final Temp (°C) | Steady-State Droop (°C) | Final PWM | Notes |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 1.0 | 8.58 | 16.63 | 30.0 | 11.50 - 187.70 | 23.93 | 6.07 | 6 | Below Prequired; clean PWM=0 start from 21.42 °C ambient. Last 60 s held steady at PWM 6, 23.83-24.00 °C. |
+| 1.5 | 12.87 | 16.63 | 30.0 | 187.84 - 390.13 | 25.01 | 4.99 | 7 | Below Prequired. Last 60 s: PWM mostly 7 (occasionally 8), 24.98-25.03 °C. |
+| 2.0 | 17.16 | 16.63 | 30.0 | 390.26 - 518.41 | 25.73 | 4.27 | 9 | ~ Prequired. Last 60 s: PWM 8-9 (mode 9), 25.67-25.76 °C. |
+| 3.0 | 25.74 | 16.63 | 30.0 | 518.54 - 636.83 | 26.54 | 3.46 | 10 | Above Prequired. Last 60 s: steady at PWM 10, 26.50-26.59 °C. |
+| 5.0 | 42.90 | 16.63 | 30.0 | 636.96 - 990.23 | 27.70 | 2.30 | 12 | Above Prequired. Last 60 s: PWM 11-12 (mode 12), 27.69-27.72 °C. |
+
+Droop drops monotonically and smoothly as `Kp` increases (6.07 -> 4.99 ->
+4.27 -> 3.46 -> 2.30 °C), as expected from a single clean, continuously
+warming run with no restarts or stale starting temperatures.
+
+## Predicted vs. measured steady-state droop
+
+Closing the loop `T = Tamb + χT,h P` with `P = Kp(Tset - T)` and solving for
+the steady-state error gives
+
+```
+Tset - T = (Tset - Tamb) / (1 + χT,h Kp)
+```
+
+Using Module 4's measured heating susceptibility `χT,h = 0.516 °C/PWM
+count`, the ambient measured in this run (`Tamb = 21.42 °C`), and
+`Tset = 30.0 °C` (so `Tset - Tamb = 8.58 °C`) gives the predicted droop
+below for each gain tested above:
+
+| Kp (PWM/°C) | χT,h Kp (dimensionless) | Predicted Steady-State Droop (°C) | Predicted Final Temp (°C) | Measured Steady-State Droop (°C) |
+| --- | ---: | ---: | ---: | ---: |
+| 1.0 | 0.52 | 5.66 | 24.34 | 6.07 |
+| 1.5 | 0.77 | 4.84 | 25.16 | 4.99 |
+| 2.0 | 1.03 | 4.22 | 25.78 | 4.27 |
+| 3.0 | 1.55 | 3.37 | 26.63 | 3.46 |
+| 5.0 | 2.58 | 2.40 | 27.60 | 2.30 |
+
+The predicted droop tracks the measured droop closely at every gain (all
+within ~0.4 °C), which is expected now that the whole sweep comes from one
+continuous, cold-started run rather than several disjoint restarts.
 
 ## How to upload and run the paired programs
 
@@ -125,11 +162,16 @@ further into over-driven territory:
    and serial port, and upload it. Leave the Arduino IDE's Serial Monitor
    **closed** afterward - only one program can hold the serial port open at
    a time, and Python needs it next.
-2. **Set up the Python environment** (first time only):
+2. **Set up the Python environment** (first time only). Create the venv
+   *outside* this repo (and outside any iCloud-synced folder like
+   `~/Documents`) - a venv left inside an iCloud "Desktop & Documents"
+   synced folder can intermittently get its files evicted/re-hydrated by
+   iCloud, which breaks PySide6's Qt platform plugin (`cocoa`) with an
+   abort on launch:
    ```bash
+   python3 -m venv ~/.venvs/phy39a_repo
+   source ~/.venvs/phy39a_repo/bin/activate
    cd "Module 5"
-   python3 -m venv venv
-   source venv/bin/activate
    pip install -r requirements.txt
    ```
 3. **Point `serial_plot_mod5.py` at the right port.** Open
@@ -139,8 +181,8 @@ further into over-driven territory:
    is plugged in).
 4. **Run it:**
    ```bash
+   source ~/.venvs/phy39a_repo/bin/activate
    cd "Module 5"
-   source venv/bin/activate
    python Python/serial_plot_mod5.py
    ```
    Run from the `Module 5` directory (not `Module 5/Python`) since

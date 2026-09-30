@@ -132,11 +132,16 @@ The first term is the intended effect of the
    and serial port, and upload it. Leave the Arduino IDE's Serial Monitor
    **closed** afterward - only one program can hold the serial port open at
    a time, and Python needs it next.
-2. **Set up the Python environment** (first time only):
+2. **Set up the Python environment** (first time only). Create the venv
+   *outside* this repo (and outside any iCloud-synced folder like
+   `~/Documents`) - a venv left inside an iCloud "Desktop & Documents"
+   synced folder can intermittently get its files evicted/re-hydrated by
+   iCloud, which breaks PySide6's Qt platform plugin (`cocoa`) with an
+   abort on launch:
    ```bash
+   python3 -m venv ~/.venvs/phy39a_repo
+   source ~/.venvs/phy39a_repo/bin/activate
    cd "Module 4"
-   python3 -m venv venv
-   source venv/bin/activate
    pip install -r requirements.txt
    ```
 3. **Point `serial_plot_mod4.py` at the right port.** Open
@@ -146,8 +151,8 @@ The first term is the intended effect of the
    is plugged in).
 4. **Run it:**
    ```bash
+   source ~/.venvs/phy39a_repo/bin/activate
    cd "Module 4"
-   source venv/bin/activate
    python Python/serial_plot_mod4.py
    ```
    The GUI window will open, the controls will enable once the serial port

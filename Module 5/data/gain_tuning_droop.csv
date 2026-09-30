@@ -1,0 +1,6 @@
+kp,chi_kp,predicted_droop_C,predicted_final_temp_C,measured_droop_C,measured_final_temp_C,final_pwm,direction,setpoint_C,tamb_C,chi_T_h_C_per_pwm
+1.0,0.516,5.66,24.34,6.07,23.93,6,HEAT,30.0,21.42,0.516
+1.5,0.774,4.84,25.16,4.99,25.01,7,HEAT,30.0,21.42,0.516
+2.0,1.032,4.22,25.78,4.27,25.73,9,HEAT,30.0,21.42,0.516
+3.0,1.548,3.37,26.63,3.46,26.54,10,HEAT,30.0,21.42,0.516
+5.0,2.580,2.40,27.60,2.30,27.70,12,HEAT,30.0,21.42,0.516
