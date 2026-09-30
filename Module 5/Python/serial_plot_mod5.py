@@ -34,6 +34,7 @@ the temperature oscillate or overshoot well past the setpoint.
 """
 
 import csv
+from pathlib import Path
 import re
 import sys
 
@@ -53,6 +54,8 @@ PLOT_UPDATE_INTERVAL_MS = 100  # how often the plots redraw
 
 TEMPERATURE_AXIS_MIN_C = 0.0
 TEMPERATURE_AXIS_MAX_C = 50.0
+TEMPERATURE_AXIS_MARGIN_C = 1.0
+MIN_TEMPERATURE_AXIS_SPAN_C = 6.0
 
 PWM_MIN = 0
 PWM_MAX = 255
@@ -71,7 +74,7 @@ DEFAULT_KP = 1.0
 KP_MIN = 0.0
 KP_MAX = 50.0
 
-OUTPUT_CSV_FILENAME = "data/temperature_log.csv"
+OUTPUT_CSV_FILENAME = Path(__file__).resolve().parents[1] / "data" / "temperature_log.csv"
 # ---------------------------------------------------------------------------
 
 LINE_PATTERN = re.compile(
@@ -365,10 +368,10 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
     def _build_temperature_plot(self):
         self.temperature_plot = pg.PlotWidget()
+        self.temperature_plot.setBackground("w")
         self.temperature_plot.setLabel("left", "Temperature", units="C")
         self.temperature_plot.setLabel("bottom", "Time", units="s")
         self.temperature_plot.showGrid(x=True, y=True)
-        self.temperature_plot.setYRange(TEMPERATURE_AXIS_MIN_C, TEMPERATURE_AXIS_MAX_C, padding=0)
         self.temperature_curve = self.temperature_plot.plot(pen=pg.mkPen(color="r", width=2))
         self.setpoint_curve = self.temperature_plot.plot(
             pen=pg.mkPen(color="g", width=2, style=QtCore.Qt.DashLine)
@@ -616,6 +619,26 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         self.error_curve.setData(self.times, self.errors)
 
+        # The temperature axis follows only the samples still visible in the
+        # rolling window. This makes small temperature changes easier to see.
+        lowest_temperature = min(self.temperatures)
+        highest_temperature = max(self.temperatures)
+        measured_span = highest_temperature - lowest_temperature
+
+        if measured_span < MIN_TEMPERATURE_AXIS_SPAN_C:
+            # If the data are nearly flat, use a six-degree window centered
+            # on the measured temperatures so noise is not over-magnified.
+            center_temperature = (lowest_temperature + highest_temperature) / 2
+            temperature_axis_min = center_temperature - MIN_TEMPERATURE_AXIS_SPAN_C / 2
+            temperature_axis_max = center_temperature + MIN_TEMPERATURE_AXIS_SPAN_C / 2
+        else:
+            # For a wider range, leave exactly one degree on each side.
+            temperature_axis_min = lowest_temperature - TEMPERATURE_AXIS_MARGIN_C
+            temperature_axis_max = highest_temperature + TEMPERATURE_AXIS_MARGIN_C
+
+        self.temperature_plot.setYRange(
+            temperature_axis_min, temperature_axis_max, padding=0
+        )
         self.temperature_plot.setXRange(window_start, latest_time, padding=0)
         self.pwm_plot.setXRange(window_start, latest_time, padding=0)
         self.error_plot.setXRange(window_start, latest_time, padding=0)
