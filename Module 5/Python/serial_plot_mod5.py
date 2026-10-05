@@ -664,5 +664,7 @@ def main():
     sys.exit(app.exec())
 
 
+# Run with:
+#   cd "/Users/joshbub/Documents/PHYS39A_Repo/PHY39A_repo/Module 5" && venv/bin/python Python/serial_plot_mod5.py
 if __name__ == "__main__":
     main()
