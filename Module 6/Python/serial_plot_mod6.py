@@ -34,9 +34,11 @@ the temperature oscillate or overshoot well past the setpoint.
 """
 
 import csv
+from collections import deque
 from pathlib import Path
 import re
 import sys
+import threading
 
 import serial
 import serial.tools.list_ports
@@ -51,6 +53,10 @@ BAUD_RATE = 9600
 
 STRIP_CHART_WINDOW_S = 60.0  # seconds of history visible on the plots
 PLOT_UPDATE_INTERVAL_MS = 100  # how often the plots redraw
+
+SERIAL_READ_TIMEOUT_S = 0.05  # bounds how long a queued command waits when the Arduino is quiet
+SERIAL_WRITE_TIMEOUT_S = 1.0  # a write blocked this long means the device stopped reading
+MANUAL_SEND_INTERVAL_MS = 150  # slider drags send at most this often (Arduino loop is ~110 ms)
 
 TEMPERATURE_AXIS_MIN_C = 0.0
 TEMPERATURE_AXIS_MAX_C = 50.0
@@ -120,58 +126,94 @@ def find_default_port():
 
 
 class SerialReader(QtCore.QThread):
-    """Runs in a background thread so reading serial data never freezes the GUI.
-
-    It both reads incoming measurement lines from the Arduino AND writes
-    outgoing "SET PWM ... DIR ..." command lines back to it, using the same
-    open serial connection.
+    """Owns the serial port. Only this thread touches the port: it reads
+    measurement lines from the Arduino and writes the "SET PWM ... DIR ..."
+    commands that the GUI thread queues with send_command().
     """
 
     measurement = QtCore.Signal(float, float, int, int)
     connected = QtCore.Signal()
     error = QtCore.Signal(str)
+    command_sent = QtCore.Signal(str)
+    commands_dropped = QtCore.Signal(int)
 
     def __init__(self, port, baud_rate, parent=None):
         super().__init__(parent)
         self._port = port
         self._baud_rate = baud_rate
         self._running = True
-        self.connection = None  # set once the serial port is actually open
+        self._outgoing = deque()
+        self._outgoing_lock = threading.Lock()
+        self._port_open = False
+
+    @property
+    def is_connected(self):
+        with self._outgoing_lock:
+            return self._port_open
 
     def run(self):
         try:
-            with serial.Serial(self._port, self._baud_rate, timeout=1) as connection:
-                self.connection = connection
+            with serial.Serial(
+                self._port,
+                self._baud_rate,
+                timeout=SERIAL_READ_TIMEOUT_S,
+                write_timeout=SERIAL_WRITE_TIMEOUT_S,
+            ) as connection:
+                with self._outgoing_lock:
+                    self._port_open = True
                 self.connected.emit()
+                buffer = b""
                 while self._running:
-                    raw_line = connection.readline().decode("utf-8", errors="ignore").strip()
-                    if not raw_line:
-                        continue
-                    match = LINE_PATTERN.search(raw_line)
-                    if not match:
-                        continue
-                    time_s = float(match.group("time"))
-                    temperature_c = float(match.group("temperature"))
-                    pwm = int(match.group("pwm"))
-                    heat_cool = int(match.group("heat_cool"))
-                    self.measurement.emit(time_s, temperature_c, pwm, heat_cool)
+                    self._write_queued_commands(connection)
+                    buffer += connection.read(max(1, connection.in_waiting))
+                    while b"\n" in buffer:
+                        raw_line, buffer = buffer.split(b"\n", 1)
+                        self._emit_measurement(raw_line)
         except serial.SerialException as error:
             self.error.emit(str(error))
         finally:
-            self.connection = None
+            with self._outgoing_lock:
+                self._port_open = False
+                dropped = len(self._outgoing)
+                self._outgoing.clear()
+            if dropped:
+                self.commands_dropped.emit(dropped)
+
+    def _write_queued_commands(self, connection):
+        while True:
+            with self._outgoing_lock:
+                if not self._outgoing:
+                    return
+                # Peek, write, then remove: if the write raises, the command
+                # stays queued and is reported as dropped instead of vanishing.
+                command = self._outgoing[0]
+            connection.write((command + "\n").encode("utf-8"))
+            with self._outgoing_lock:
+                self._outgoing.popleft()
+            self.command_sent.emit(command)
+
+    def _emit_measurement(self, raw_line):
+        text = raw_line.decode("utf-8", errors="ignore").strip()
+        match = LINE_PATTERN.search(text)
+        if not match:
+            return
+        self.measurement.emit(
+            float(match.group("time")),
+            float(match.group("temperature")),
+            int(match.group("pwm")),
+            int(match.group("heat_cool")),
+        )
 
     def send_command(self, command_text):
-        """Write one line of text to the Arduino, e.g. "SET PWM 120 DIR HEAT".
-
-        Serial commands are plain text lines ending in a newline character,
-        which is what Serial.readStringUntil('\\n') (or similar) expects on
-        the Arduino side. If the port isn't open yet, this just does nothing
-        instead of crashing.
+        """Queue one command line, e.g. "SET PWM 120 DIR HEAT", for the reader
+        thread to write. Returns False if the port is not open, so the caller
+        can report that the command was not sent.
         """
-        if self.connection is None or not self.connection.is_open:
-            return
-        line_with_ending = command_text + "\n"
-        self.connection.write(line_with_ending.encode("utf-8"))
+        with self._outgoing_lock:
+            if not self._port_open:
+                return False
+            self._outgoing.append(command_text)
+            return True
 
     def stop(self):
         self._running = False
@@ -225,10 +267,17 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.redraw_timer.timeout.connect(self.redraw_plots)
         self.redraw_timer.start(PLOT_UPDATE_INTERVAL_MS)
 
+        self.manual_send_timer = QtCore.QTimer(self)
+        self.manual_send_timer.setSingleShot(True)
+        self.manual_send_timer.setInterval(MANUAL_SEND_INTERVAL_MS)
+        self.manual_send_timer.timeout.connect(self.send_current_settings)
+
         self.reader = SerialReader(port, baud_rate)
         self.reader.measurement.connect(self.on_measurement)
         self.reader.connected.connect(self.on_serial_connected)
         self.reader.error.connect(self.on_error)
+        self.reader.command_sent.connect(self.on_command_sent)
+        self.reader.commands_dropped.connect(self.on_commands_dropped)
         self.reader.start()
 
     # -----------------------------------------------------------------
@@ -411,16 +460,23 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
     # Serial command sending
     # -----------------------------------------------------------------
     def send_current_settings(self):
-        """Send the currently selected PWM value and direction to the
-        Arduino as one command line, e.g. "SET PWM 120 DIR HEAT". The PWM
-        value and direction always travel together in a single command so
-        the Arduino never receives one without the other.
+        """Queue the currently selected PWM value and direction as one
+        command line, e.g. "SET PWM 120 DIR HEAT". The PWM value and
+        direction always travel together in a single command so the Arduino
+        never receives one without the other.
         """
         command = f"SET PWM {self.current_pwm} DIR {self.current_direction}"
-        self.reader.send_command(command)
-        # Printing here is our "terminal output": run this script from a
-        # terminal and you'll see every command as it's sent.
+        if not self.reader.send_command(command):
+            print(f"Not sent (port not open): {command}")
+
+    @QtCore.Slot(str)
+    def on_command_sent(self, command):
+        # Printed only after the reader thread has actually written the line.
         print(f"Sent: {command}")
+
+    @QtCore.Slot(int)
+    def on_commands_dropped(self, count):
+        print(f"Not sent (port closed): {count} queued command(s) discarded")
 
     def apply_pwm(self, value):
         """Clamp a requested PWM value, then keep the slider, the text box,
@@ -463,7 +519,14 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int)
     def on_slider_moved(self, value):
-        self.apply_pwm(value)
+        # Drags emit many value changes; the timer sends the latest value once
+        # per interval instead of one command per tick.
+        self.current_pwm = clamp_pwm(int(value))
+        self.pwm_edit.blockSignals(True)
+        self.pwm_edit.setText(str(self.current_pwm))
+        self.pwm_edit.blockSignals(False)
+        if not self.manual_send_timer.isActive():
+            self.manual_send_timer.start()
 
     @QtCore.Slot()
     def on_pwm_edit_finished(self):
@@ -484,7 +547,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.control_mode = "P" if p_is_checked else "MANUAL"
         # Manual widgets are disabled in P mode so the two controllers can
         # never fight over the same serial link.
-        self.manual_control_box.setEnabled(not p_is_checked and self.reader.connection is not None)
+        self.manual_control_box.setEnabled(not p_is_checked and self.reader.is_connected)
         if not p_is_checked:
             # Switching back to Manual: resume from whatever the slider/
             # radio buttons are currently showing, rather than leaving the
