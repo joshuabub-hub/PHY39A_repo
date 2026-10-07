@@ -125,6 +125,18 @@ Steady-State Droop is `Setpoint - Final Temp`.
 | 3.0 | 25.74 | 16.63 | 30.0 | 518.54 - 636.83 | 26.54 | 3.46 | 10 | Above Prequired. Last 60 s: steady at PWM 10, 26.50-26.59 °C. |
 | 5.0 | 42.90 | 16.63 | 30.0 | 636.96 - 990.23 | 27.70 | 2.30 | 12 | Above Prequired. Last 60 s: PWM 11-12 (mode 12), 27.69-27.72 °C. |
 
+```
+L = (T_steadystate - T_ambient) / (T_set - T_steadystate)
+```
+
+L1 = 0.414, L2 = 0.719, L3 = 1.009, L4 = 1.480, L5 = 2.730 (for Kp = 1.0, 1.5, 2.0, 3.0, 5.0; using T_amb = 21.42 °C and T_set = 30.0 °C)
+
+```
+D = 1 / (L + 1)
+```
+
+D1 = 0.708, D2 = 0.582, D3 = 0.498, D4 = 0.403, D5 = 0.268 (for L1 through L5, respectively)
+
 Droop drops monotonically and smoothly as `Kp` increases (6.07 -> 4.99 ->
 4.27 -> 3.46 -> 2.30 °C), as expected from a single clean, continuously
 warming run with no restarts or stale starting temperatures.
@@ -154,6 +166,23 @@ below for each gain tested above:
 The predicted droop tracks the measured droop closely at every gain (all
 within ~0.4 °C), which is expected now that the whole sweep comes from one
 continuous, cold-started run rather than several disjoint restarts.
+
+## High-gain response log
+
+Records how the loop behaves at gains well above `Prequired`, where it may
+not settle to a fixed droop. Fill each row from a run that has reached
+steady oscillation, not from the initial transient. `Settles?` is whether
+the temperature stops oscillating; amplitude and period are measured from
+the steady oscillation; saturation is the fraction of time the PWM is
+clamped at 0 or 255.
+
+| Kp (PWM/°C) | Settles? | Mean Temperature (°C) | Amplitude (°C) | Period (s) | Frequency (Hz) | Saturation |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | Yes | 29.86 | 0.03 | N/A | N/A |  |
+| 200 | No | 29.93 | 0.085 | 6.1 | 0.164 |  |
+| 300 | No | 29.98 | 0.14 | 5.7 | 0.175 |  |
+| 400 | No | 30.05 | 0.27 | 5.4 | 0.184 |  |
+| 500 | No | 30.30 | 0.70 | 5.9 | 0.171 |  |
 
 ## How to upload and run the paired programs
 
