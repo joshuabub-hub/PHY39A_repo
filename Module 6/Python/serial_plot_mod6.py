@@ -91,6 +91,7 @@ LINE_PATTERN = re.compile(
 )
 
 CSV_FIELDNAMES = [
+    "session",
     "time_s",
     "temperature_C",
     "pwm",
@@ -99,6 +100,11 @@ CSV_FIELDNAMES = [
     "setpoint_C",
     "kp",
     "error_C",
+    # Integral-control columns. Left blank until PI control is implemented.
+    "ki",
+    "p_term",
+    "i_term",
+    "integral_C_s",
 ]
 
 # The Arduino reports direction as an integer (1 = heating, 0 = cooling).
@@ -113,6 +119,43 @@ def clamp_pwm(value):
     PWM_MAX, and anything already in range is returned unchanged.
     """
     return max(PWM_MIN, min(PWM_MAX, value))
+
+
+def open_csv_log(path):
+    """Open the log for appending and return (file, writer, session).
+
+    The Arduino's clock restarts whenever the port is opened, so every run
+    gets the next session number and time_s is only meaningful within one
+    session. If an existing log has a different header (e.g. columns were
+    added), it is renamed to *.old.csv instead of being appended to or
+    overwritten, so the columns never misalign.
+    """
+    session = 1
+    if path.exists() and path.stat().st_size > 0:
+        with open(path, newline="") as existing:
+            reader = csv.DictReader(existing)
+            if reader.fieldnames == CSV_FIELDNAMES:
+                for row in reader:
+                    try:
+                        session = int(row["session"]) + 1
+                    except (TypeError, ValueError):
+                        pass
+            else:
+                existing.close()
+                backup = path.with_suffix(".old.csv")
+                n = 1
+                while backup.exists():
+                    backup = path.with_suffix(f".old{n}.csv")
+                    n += 1
+                path.rename(backup)
+                print(f"Log header changed; old log moved to {backup.name}")
+    write_header = not path.exists() or path.stat().st_size == 0
+    csv_file = open(path, "a", newline="")
+    writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES)
+    if write_header:
+        writer.writeheader()
+        csv_file.flush()
+    return csv_file, writer, session
 
 
 def find_default_port():
@@ -259,9 +302,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # can't try to write to a port that isn't ready yet.
         self.manual_control_box.setEnabled(False)
 
-        self.csv_file = open(OUTPUT_CSV_FILENAME, "w", newline="")
-        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=CSV_FIELDNAMES)
-        self.csv_writer.writeheader()
+        self.csv_file, self.csv_writer, self.session = open_csv_log(OUTPUT_CSV_FILENAME)
 
         self.redraw_timer = QtCore.QTimer(self)
         self.redraw_timer.timeout.connect(self.redraw_plots)
@@ -433,6 +474,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         solid red while heating, solid blue while cooling.
         """
         self.pwm_plot = pg.PlotWidget()
+        self.pwm_plot.setBackground("w")
         self.pwm_plot.setLabel("left", "PWM", units="")
         self.pwm_plot.setLabel("bottom", "Time", units="s")
         self.pwm_plot.showGrid(x=True, y=True)
@@ -446,6 +488,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         so it's obvious at a glance which side of the setpoint we're on.
         """
         self.error_plot = pg.PlotWidget()
+        self.error_plot.setBackground("w")
         self.error_plot.setLabel("left", "Error (Tset - T)", units="C")
         self.error_plot.setLabel("bottom", "Time", units="s")
         self.error_plot.showGrid(x=True, y=True)
@@ -632,6 +675,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.time_label.setText(f"Time: {time_s:.2f} s")
 
         self.csv_writer.writerow({
+            "session": self.session,
             "time_s": time_s,
             "temperature_C": temperature_c,
             "pwm": pwm,
