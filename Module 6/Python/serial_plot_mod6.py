@@ -1,7 +1,7 @@
 """Read the PWM_Serial_Control sketch's serial output, plot temperature,
 PWM, direction, setpoint, and error vs. time, and send PWM/direction
 commands back to the Arduino - either by hand (Manual mode, identical to
-Module 4) or from a proportional-only (P) closed-loop controller.
+Module 4) or from a proportional-integral (PI) closed-loop controller.
 
 Incoming lines from the Arduino are expected in the form (same sketch,
 unchanged from Module 4):
@@ -19,18 +19,26 @@ cutoff no matter what this script asks for.
 
 Two control modes are available from the GUI:
   - Manual: pick a PWM value and direction by hand, exactly like Module 4.
-  - P Control: every time a new (already 1000-sample-averaged) temperature
+  - PI Control: every time a new (already 1000-sample-averaged) temperature
     arrives from the Arduino, this script computes
-        e = Tset - T
-        u = Kp * e
-    turns the sign of u into a direction (u >= 0 -> HEAT, u < 0 -> COOL)
-    and |u| (rounded to the nearest integer, clamped to 0-255) into a PWM
-    magnitude, and sends that direction/magnitude pair to the Arduino as
-    one "SET PWM ... DIR ..." command, same as Manual mode would.
+        e_n     = Tset - T_n
+        q_n+1   = q_n + e_n * dt_n
+        u_n     = Kp * e_n + Ki * q_n+1
+    where dt_n is the Arduino-reported time between this measurement and
+    the previous accepted one. The sign of u (the requested command) becomes
+    the direction (u >= 0 -> HEAT, u < 0 -> COOL) and |u|, rounded to the
+    nearest integer and clamped to 0-255, becomes the PWM magnitude (the
+    applied command). That pair is sent as one "SET PWM ... DIR ..." command,
+    same as Manual mode would.
 
-Start Kp small (see DEFAULT_KP below) and increase it gradually - a gain
-that's too large will slam the PWM to its clamped extremes and can make
-the temperature oscillate or overshoot well past the setpoint.
+Anti-windup is conditional integration: if the command requested with the
+old integral (Kp * e_n + Ki * q_n) is already beyond the PWM limit and e_n
+has the same sign as that command (so integrating would push it farther
+into saturation), q is held for that step. The output clamp and the
+Arduino's own over-temperature cutoff stay active regardless.
+
+With Ki = 0 this is the Module 5 P-only controller. Start gains small (see
+DEFAULT_KP / DEFAULT_KI below) and increase them gradually.
 """
 
 import csv
@@ -66,6 +74,16 @@ MIN_TEMPERATURE_AXIS_SPAN_C = 6.0
 PWM_MIN = 0
 PWM_MAX = 255
 
+# Legends sit in each plot's top-left corner (a positive offset anchors to
+# the top-left) on an opaque light-gray box with a dark border and dark text.
+LEGEND_OPTIONS = dict(
+    offset=(10, 10),
+    labelTextSize="11pt",
+    labelTextColor=(20, 20, 20),
+    brush=pg.mkBrush(235, 235, 235, 240),
+    pen=pg.mkPen(color=(90, 90, 90), width=1),
+)
+
 # P-control defaults. Kp is in PWM counts per degree C of error - e.g. with
 # the default Kp below, a 10 C error commands a PWM magnitude of only 10,
 # which is small next to Module 4's useful PWM ranges (up to 45 heating, up
@@ -79,6 +97,15 @@ SETPOINT_MAX_C = TEMPERATURE_AXIS_MAX_C
 DEFAULT_KP = 1.0
 KP_MIN = 0.0
 KP_MAX = 500.0
+
+# Ki is in PWM counts per (degree C * second) of accumulated error, so
+# Ki * q has the same PWM units as Kp * e. The slider moves in steps of
+# 1 / KI_SLIDER_SCALE; the text box accepts the same resolution.
+DEFAULT_KI = 0.0
+KI_MIN = 0.0
+KI_MAX = 10.0
+KI_DECIMALS = 3
+KI_SLIDER_SCALE = 10 ** KI_DECIMALS
 
 OUTPUT_CSV_FILENAME = Path(__file__).resolve().parents[1] / "data" / "temperature_log.csv"
 # ---------------------------------------------------------------------------
@@ -100,11 +127,17 @@ CSV_FIELDNAMES = [
     "setpoint_C",
     "kp",
     "error_C",
-    # Integral-control columns. Left blank until PI control is implemented.
+    # PI columns, blank in Manual mode. p_term = Kp * e, i_term = Ki * q_n+1,
+    # integral_C_s = q_n+1, u_requested = p_term + i_term (unclamped),
+    # u_applied = signed PWM actually sent (+ HEAT, - COOL) after the clamp.
     "ki",
+    "dt_s",
     "p_term",
     "i_term",
     "integral_C_s",
+    "integral_held",
+    "u_requested",
+    "u_applied",
 ]
 
 # The Arduino reports direction as an integer (1 = heating, 0 = cooling).
@@ -266,15 +299,23 @@ class SerialReader(QtCore.QThread):
 class TemperaturePlotWindow(QtWidgets.QMainWindow):
     def __init__(self, port, baud_rate):
         super().__init__()
-        self.setWindowTitle(f"TEC Temperature & P Controller - {port}")
+        self.setWindowTitle(f"TEC Temperature & PI Controller - {port}")
 
         # Current control-panel state (what we intend to send to the
         # Arduino). In Manual mode these come straight from the direction
-        # radios / PWM slider; in P mode compute_p_control() overwrites them
-        # every time a new measurement arrives.
+        # radios / PWM slider; in PI mode compute_pi_control() overwrites
+        # them every time a new measurement arrives.
         self.current_pwm = 0
         self.current_direction = "COOL"
-        self.control_mode = "MANUAL"  # or "P"
+        self.control_mode = "MANUAL"  # or "PI"
+
+        # PI state. integral is q (degree C * s). previous_pi_time_s is the
+        # Arduino time of the last measurement the PI step used, so dt comes
+        # from real elapsed time; None means the next step has no previous
+        # sample and integrates over dt = 0.
+        self.integral = 0.0
+        self.previous_pi_time_s = None
+        self.saved_ki = DEFAULT_KI  # Ki to restore when P-only is turned off
 
         # History lists used to draw the strip charts. Every new measurement
         # appends one entry to each of these, and old entries are dropped
@@ -285,15 +326,18 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.directions = []  # "HEAT" or "COOL" for each sample, same length as above
         self.setpoints = []
         self.errors = []
+        self.p_terms = []  # u_P = Kp * e; NaN for Manual-mode samples (gap in the plot)
+        self.i_terms = []  # u_I = Ki * q_n+1; NaN for Manual-mode samples
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QtWidgets.QVBoxLayout(central_widget)
 
         main_layout.addWidget(self._build_live_readings_box())
+        main_layout.addWidget(self._build_pi_readings_box())
         main_layout.addWidget(self._build_mode_box())
         main_layout.addWidget(self._build_manual_control_box())
-        main_layout.addWidget(self._build_p_control_box())
+        main_layout.addWidget(self._build_pi_control_box())
         main_layout.addWidget(self._build_temperature_plot())
         main_layout.addWidget(self._build_pwm_plot())
         main_layout.addWidget(self._build_error_plot())
@@ -356,23 +400,54 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         return box
 
+    def _build_pi_readings_box(self):
+        """Build the row of labels showing the latest PI step: the error,
+        both terms, the integral, the requested (unclamped) command, the
+        applied (clamped, signed) command, and whether anti-windup held q.
+        """
+        box = QtWidgets.QGroupBox("PI Terms (latest step)")
+        layout = QtWidgets.QHBoxLayout(box)
+
+        self.pi_error_label = QtWidgets.QLabel("e: -- C")
+        self.p_term_label = QtWidgets.QLabel("u_P: --")
+        self.i_term_label = QtWidgets.QLabel("u_I: --")
+        self.integral_label = QtWidgets.QLabel("q: 0.00 C*s")
+        self.u_requested_label = QtWidgets.QLabel("Requested u: --")
+        self.u_applied_label = QtWidgets.QLabel("Applied u: --")
+        self.integrator_label = QtWidgets.QLabel("Integrator: --")
+
+        labels = (
+            self.pi_error_label,
+            self.p_term_label,
+            self.i_term_label,
+            self.integral_label,
+            self.u_requested_label,
+            self.u_applied_label,
+            self.integrator_label,
+        )
+        for label in labels:
+            label.setStyleSheet("font-size: 12pt;")
+            layout.addWidget(label)
+
+        return box
+
     def _build_mode_box(self):
-        """Build the Manual/P Control switch. Only one mode drives the
+        """Build the Manual/PI Control switch. Only one mode drives the
         Arduino at a time - the other mode's widgets stay visible (and, for
-        the P-control setpoint/Kp, editable) but don't send anything.
+        the PI setpoint/gains, editable) but don't send anything.
         """
         box = QtWidgets.QGroupBox("Control Mode")
         layout = QtWidgets.QHBoxLayout(box)
 
         self.manual_mode_radio = QtWidgets.QRadioButton("Manual")
-        self.p_mode_radio = QtWidgets.QRadioButton("P Control")
+        self.pi_mode_radio = QtWidgets.QRadioButton("PI Control")
         self.manual_mode_radio.setChecked(True)  # start open-loop, same as Module 4
         self.mode_button_group = QtWidgets.QButtonGroup(self)
         self.mode_button_group.addButton(self.manual_mode_radio)
-        self.mode_button_group.addButton(self.p_mode_radio)
+        self.mode_button_group.addButton(self.pi_mode_radio)
         layout.addWidget(self.manual_mode_radio)
-        layout.addWidget(self.p_mode_radio)
-        self.p_mode_radio.toggled.connect(self.on_mode_changed)
+        layout.addWidget(self.pi_mode_radio)
+        self.pi_mode_radio.toggled.connect(self.on_mode_changed)
 
         return box
 
@@ -427,13 +502,15 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         return self.manual_control_box
 
-    def _build_p_control_box(self):
-        """Build the setpoint and Kp inputs for P-only control. Editable
-        regardless of the current mode, but only actually drives the
-        Arduino while Control Mode is P Control.
+    def _build_pi_control_box(self):
+        """Build the setpoint, Kp, and Ki inputs plus the integral reset
+        button. Editable regardless of the current mode, but only actually
+        drives the Arduino while Control Mode is PI Control.
         """
-        self.p_control_box = QtWidgets.QGroupBox("P Control")
-        layout = QtWidgets.QHBoxLayout(self.p_control_box)
+        self.pi_control_box = QtWidgets.QGroupBox("PI Control")
+        box_layout = QtWidgets.QVBoxLayout(self.pi_control_box)
+        layout = QtWidgets.QHBoxLayout()
+        box_layout.addLayout(layout)
 
         self.setpoint_spinbox = QtWidgets.QDoubleSpinBox()
         self.setpoint_spinbox.setRange(SETPOINT_MIN_C, SETPOINT_MAX_C)
@@ -452,9 +529,44 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.setpoint_spinbox)
         layout.addWidget(QtWidgets.QLabel("Kp:"))
         layout.addWidget(self.kp_spinbox)
-        layout.addWidget(QtWidgets.QLabel("u = Kp * (Tset - T); sign(u) -> direction, |u| -> PWM"))
+        layout.addWidget(QtWidgets.QLabel("u = Kp*e + Ki*q; sign(u) -> direction, |u| -> PWM"))
 
-        return self.p_control_box
+        # --- Ki slider + text box ------------------------------------------
+        # QSlider only holds integers, so it stores Ki * KI_SLIDER_SCALE.
+        # The two widgets are kept in sync the same way as the PWM slider and
+        # text box, with signals blocked so neither re-triggers the other.
+        ki_layout = QtWidgets.QHBoxLayout()
+        box_layout.addLayout(ki_layout)
+
+        self.ki_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.ki_slider.setMinimum(round(KI_MIN * KI_SLIDER_SCALE))
+        self.ki_slider.setMaximum(round(KI_MAX * KI_SLIDER_SCALE))
+        self.ki_slider.setValue(round(DEFAULT_KI * KI_SLIDER_SCALE))
+        self.ki_slider.valueChanged.connect(self.on_ki_slider_moved)
+
+        self.ki_spinbox = QtWidgets.QDoubleSpinBox()
+        self.ki_spinbox.setRange(KI_MIN, KI_MAX)
+        self.ki_spinbox.setDecimals(KI_DECIMALS)
+        self.ki_spinbox.setSingleStep(1 / KI_SLIDER_SCALE)
+        self.ki_spinbox.setValue(DEFAULT_KI)
+        self.ki_spinbox.valueChanged.connect(self.on_ki_spinbox_changed)
+
+        self.reset_integral_button = QtWidgets.QPushButton("Reset integral (q = 0)")
+        self.reset_integral_button.clicked.connect(self.reset_integral)
+
+        # Checkable: while pressed, Ki is forced to 0 and its slider/text box
+        # are grayed out, so the controller is P-only.
+        self.p_only_button = QtWidgets.QPushButton("P Control (Ki = 0)")
+        self.p_only_button.setCheckable(True)
+        self.p_only_button.toggled.connect(self.on_p_only_toggled)
+
+        ki_layout.addWidget(QtWidgets.QLabel(f"Ki ({KI_MIN:g}-{KI_MAX:g}):"))
+        ki_layout.addWidget(self.ki_slider)
+        ki_layout.addWidget(self.ki_spinbox)
+        ki_layout.addWidget(self.p_only_button)
+        ki_layout.addWidget(self.reset_integral_button)
+
+        return self.pi_control_box
 
     def _build_temperature_plot(self):
         self.temperature_plot = pg.PlotWidget()
@@ -479,24 +591,69 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.pwm_plot.setLabel("bottom", "Time", units="s")
         self.pwm_plot.showGrid(x=True, y=True)
         self.pwm_plot.setYRange(PWM_MIN, PWM_MAX, padding=0)
-        self.pwm_heat_curve = self.pwm_plot.plot(pen=pg.mkPen(color="r", width=2))
-        self.pwm_cool_curve = self.pwm_plot.plot(pen=pg.mkPen(color="b", width=2))
+        # The legend must exist before the curves so plot(name=...) adds them.
+        self.pwm_plot.addLegend(**LEGEND_OPTIONS)
+        self.pwm_heat_curve = self.pwm_plot.plot(
+            pen=pg.mkPen(color="r", width=2), name="Heating"
+        )
+        self.pwm_cool_curve = self.pwm_plot.plot(
+            pen=pg.mkPen(color="b", width=2), name="Cooling"
+        )
         return self.pwm_plot
 
     def _build_error_plot(self):
-        """Build the error (Tset - T) strip chart, with a dashed zero line
-        so it's obvious at a glance which side of the setpoint we're on.
+        """Build the error (Tset - T) strip chart with u_P and u_I drawn
+        alongside it. Error is in C on the left axis; u_P and u_I are in PWM
+        counts on the right axis, in a second ViewBox that shares the time
+        axis. redraw_plots() keeps both y ranges symmetric about zero, so the
+        dashed zero line is zero on both axes.
         """
         self.error_plot = pg.PlotWidget()
         self.error_plot.setBackground("w")
-        self.error_plot.setLabel("left", "Error (Tset - T)", units="C")
-        self.error_plot.setLabel("bottom", "Time", units="s")
-        self.error_plot.showGrid(x=True, y=True)
+        plot_item = self.error_plot.getPlotItem()
+        plot_item.setLabel("left", "Error (Tset - T)", units="C")
+        plot_item.setLabel("bottom", "Time", units="s")
+        plot_item.showGrid(x=True, y=True)
         zero_line = pg.InfiniteLine(
             pos=0, angle=0, pen=pg.mkPen(color=(128, 128, 128), style=QtCore.Qt.DashLine)
         )
-        self.error_plot.addItem(zero_line)
-        self.error_curve = self.error_plot.plot(pen=pg.mkPen(color="orange", width=2))
+        plot_item.addItem(zero_line)
+
+        legend = plot_item.addLegend(**LEGEND_OPTIONS)
+        self.error_curve = plot_item.plot(
+            pen=pg.mkPen(color="orange", width=2), name="Error e"
+        )
+
+        self.u_viewbox = pg.ViewBox()
+        plot_item.showAxis("right")
+        plot_item.scene().addItem(self.u_viewbox)
+        plot_item.getAxis("right").linkToView(self.u_viewbox)
+        plot_item.getAxis("right").setLabel("u_P, u_I (PWM)")
+        self.u_viewbox.setXLink(plot_item)
+        self.u_viewbox.setZValue(plot_item.vb.zValue() + 1)
+
+        def match_main_viewbox():
+            self.u_viewbox.setGeometry(plot_item.vb.sceneBoundingRect())
+            self.u_viewbox.linkedViewChanged(plot_item.vb, self.u_viewbox.XAxis)
+
+        plot_item.vb.sigResized.connect(match_main_viewbox)
+
+        # connect="finite" leaves gaps at the NaNs logged for Manual mode.
+        # u_P = Kp * e has the same shape as e, so it is dashed and drawn on
+        # top of the error curve; otherwise it can hide exactly behind it.
+        self.p_term_curve = pg.PlotDataItem(
+            pen=pg.mkPen(color=(128, 0, 160), width=2, style=QtCore.Qt.DashLine),
+            connect="finite",
+        )
+        self.i_term_curve = pg.PlotDataItem(
+            pen=pg.mkPen(color=(0, 140, 140), width=2), connect="finite"
+        )
+        self.u_viewbox.addItem(self.p_term_curve)
+        self.u_viewbox.addItem(self.i_term_curve)
+        # These curves live in the second ViewBox, so add them to the legend
+        # by hand.
+        legend.addItem(self.p_term_curve, "u_P = Kp*e")
+        legend.addItem(self.i_term_curve, "u_I = Ki*q")
         return self.error_plot
 
     # -----------------------------------------------------------------
@@ -524,7 +681,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
     def apply_pwm(self, value):
         """Clamp a requested PWM value, then keep the slider, the text box,
         and self.current_pwm all in agreement before sending it out. Only
-        called from the Manual-mode widgets, which are disabled while P
+        called from the Manual-mode widgets, which are disabled while PI
         Control is active.
         """
         value = clamp_pwm(int(value))
@@ -536,13 +693,13 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """Update the direction radios and PWM slider/text box to reflect
         (pwm, direction) without re-triggering their own signal handlers -
         used both when the user changes them directly (Manual mode) and
-        when compute_p_control() wants the GUI to show what it just
-        commanded (P mode), so the panel always shows the truth.
+        when compute_pi_control() wants the GUI to show what it just
+        commanded (PI mode), so the panel always shows the truth.
         """
         # blockSignals stops these widgets from firing their own
         # "value changed" signals while we set them programmatically, which
         # would otherwise cause an infinite slider <-> text box update loop
-        # (or re-entrant sends in P mode).
+        # (or re-entrant sends in PI mode).
         self.pwm_slider.blockSignals(True)
         self.pwm_slider.setValue(pwm)
         self.pwm_slider.blockSignals(False)
@@ -585,16 +742,58 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.current_direction = "HEAT" if heat_is_checked else "COOL"
         self.send_current_settings()
 
+    @QtCore.Slot(int)
+    def on_ki_slider_moved(self, value):
+        self.ki_spinbox.blockSignals(True)
+        self.ki_spinbox.setValue(value / KI_SLIDER_SCALE)
+        self.ki_spinbox.blockSignals(False)
+
+    @QtCore.Slot(float)
+    def on_ki_spinbox_changed(self, value):
+        self.ki_slider.blockSignals(True)
+        self.ki_slider.setValue(round(value * KI_SLIDER_SCALE))
+        self.ki_slider.blockSignals(False)
+
     @QtCore.Slot(bool)
-    def on_mode_changed(self, p_is_checked):
-        self.control_mode = "P" if p_is_checked else "MANUAL"
-        # Manual widgets are disabled in P mode so the two controllers can
+    def on_p_only_toggled(self, p_only):
+        """Turn P-only control on (Ki -> 0, Ki widgets grayed out) or off
+        (Ki restored to its value before P-only was turned on). q is reset
+        either way, so a stale integral never kicks in when Ki comes back.
+        """
+        if p_only:
+            self.saved_ki = self.ki_spinbox.value()
+            self.ki_spinbox.setValue(0.0)  # on_ki_spinbox_changed moves the slider too
+        else:
+            self.ki_spinbox.setValue(self.saved_ki)
+        self.ki_slider.setEnabled(not p_only)
+        self.ki_spinbox.setEnabled(not p_only)
+        self.reset_integral()
+
+    @QtCore.Slot()
+    def reset_integral(self):
+        """Set q = 0, e.g. before starting a new comparison run. The dt
+        reference is kept, so the next step still integrates over the real
+        time since the previous measurement.
+        """
+        self.integral = 0.0
+        self.integral_label.setText(f"q: {self.integral:.2f} C*s")
+        print("Integral reset: q = 0")
+
+    @QtCore.Slot(bool)
+    def on_mode_changed(self, pi_is_checked):
+        self.control_mode = "PI" if pi_is_checked else "MANUAL"
+        # Manual widgets are disabled in PI mode so the two controllers can
         # never fight over the same serial link.
-        self.manual_control_box.setEnabled(not p_is_checked and self.reader.is_connected)
-        if not p_is_checked:
+        self.manual_control_box.setEnabled(not pi_is_checked and self.reader.is_connected)
+        # Each PI run starts from q = 0 with no previous sample, so time
+        # spent in Manual mode is never integrated.
+        self.previous_pi_time_s = None
+        if pi_is_checked:
+            self.reset_integral()
+        else:
             # Switching back to Manual: resume from whatever the slider/
             # radio buttons are currently showing, rather than leaving the
-            # Arduino running on the last PWM computed by the P controller.
+            # Arduino running on the last PWM computed by the PI controller.
             self.current_pwm = self.pwm_slider.value()
             self.current_direction = "HEAT" if self.heat_radio.isChecked() else "COOL"
             self.send_current_settings()
@@ -608,51 +807,90 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.send_current_settings()
 
     # -----------------------------------------------------------------
-    # P-only control
+    # PI control
     # -----------------------------------------------------------------
-    def compute_p_control(self, temperature_c):
-        """Proportional-only control law, run once per incoming (already
+    def compute_pi_control(self, time_s, temperature_c):
+        """PI control law, run once per incoming (already
         1000-sample-averaged) temperature measurement while Control Mode is
-        P Control:
+        PI Control:
 
-            e = Tset - T
-            u = Kp * e
+            e_n   = Tset - T_n
+            q_n+1 = q_n + e_n * dt_n     (unless anti-windup holds it)
+            u_n   = Kp * e_n + Ki * q_n+1
+
+        dt_n is the Arduino time since the previous accepted measurement
+        (0 on the first PI step, and never negative).
+
+        Conditional integration: the command requested with the old
+        integral, Kp * e_n + Ki * q_n, is checked first. If it is already
+        beyond the PWM limit and e_n has the same sign (integrating would
+        push it farther into saturation), q is not updated on this step.
 
         The sign of u becomes the direction (u >= 0 -> HEAT, since a
         positive error means we're colder than the setpoint; u < 0 -> COOL),
         and |u| becomes the PWM magnitude, rounded to the nearest integer
         and clamped to 0-255 before being sent to the Arduino.
 
-        Returns (setpoint, error) so the caller can log/plot them even
-        though the send itself already happened here.
+        Returns a dict of everything the caller logs and displays; the send
+        itself already happened here.
         """
         setpoint = self.setpoint_spinbox.value()
         kp = self.kp_spinbox.value()
+        ki = self.ki_spinbox.value()
         error = setpoint - temperature_c
-        u = kp * error
 
-        direction = "HEAT" if u >= 0 else "COOL"
-        pwm_magnitude = clamp_pwm(int(round(abs(u))))
+        if self.previous_pi_time_s is None:
+            dt = 0.0
+        else:
+            dt = max(0.0, time_s - self.previous_pi_time_s)
+        self.previous_pi_time_s = time_s
+
+        u_before = kp * error + ki * self.integral
+        integral_held = abs(u_before) > PWM_MAX and error * u_before > 0
+        if not integral_held:
+            self.integral += error * dt
+
+        p_term = kp * error
+        i_term = ki * self.integral
+        u_requested = p_term + i_term
+
+        direction = "HEAT" if u_requested >= 0 else "COOL"
+        pwm_magnitude = clamp_pwm(int(round(abs(u_requested))))
+        u_applied = pwm_magnitude if direction == "HEAT" else -pwm_magnitude
 
         self.current_pwm = pwm_magnitude
         self.current_direction = direction
         self._sync_manual_widgets(pwm_magnitude, direction)
         self.send_current_settings()
 
-        return setpoint, error
+        return {
+            "setpoint": setpoint,
+            "error": error,
+            "kp": kp,
+            "ki": ki,
+            "dt": dt,
+            "p_term": p_term,
+            "i_term": i_term,
+            "integral": self.integral,
+            "integral_held": integral_held,
+            "u_requested": u_requested,
+            "u_applied": u_applied,
+        }
 
     # -----------------------------------------------------------------
     # Incoming measurements + plot updates
     # -----------------------------------------------------------------
     @QtCore.Slot(float, float, int, int)
     def on_measurement(self, time_s, temperature_c, pwm, heat_cool):
-        if self.control_mode == "P":
-            setpoint, error = self.compute_p_control(temperature_c)
+        pi = None
+        if self.control_mode == "PI":
+            pi = self.compute_pi_control(time_s, temperature_c)
+            setpoint, error = pi["setpoint"], pi["error"]
         else:
             # Manual mode still drives nothing off temperature, but we keep
             # computing/showing setpoint and error against the current
             # spinbox values so they're ready to read the moment you switch
-            # to P Control.
+            # to PI Control.
             setpoint = self.setpoint_spinbox.value()
             error = setpoint - temperature_c
 
@@ -664,6 +902,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.directions.append(direction)
         self.setpoints.append(setpoint)
         self.errors.append(error)
+        self.p_terms.append(pi["p_term"] if pi is not None else float("nan"))
+        self.i_terms.append(pi["i_term"] if pi is not None else float("nan"))
 
         # Update the live readout labels with what the Arduino just reported
         # (temperature/PWM/direction/time) plus this script's own setpoint/error.
@@ -674,7 +914,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.error_label.setText(f"Error: {error:+.2f} C")
         self.time_label.setText(f"Time: {time_s:.2f} s")
 
-        self.csv_writer.writerow({
+        self.pi_error_label.setText(f"e: {error:+.2f} C")
+        row = {
             "session": self.session,
             "time_s": time_s,
             "temperature_C": temperature_c,
@@ -684,7 +925,27 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             "setpoint_C": setpoint,
             "kp": self.kp_spinbox.value(),
             "error_C": error,
-        })
+        }
+        if pi is not None:
+            self.p_term_label.setText(f"u_P: {pi['p_term']:+.1f}")
+            self.i_term_label.setText(f"u_I: {pi['i_term']:+.1f}")
+            self.integral_label.setText(f"q: {pi['integral']:.2f} C*s")
+            self.u_requested_label.setText(f"Requested u: {pi['u_requested']:+.1f}")
+            self.u_applied_label.setText(f"Applied u: {pi['u_applied']:+d}")
+            self.integrator_label.setText(
+                "Integrator: HELD" if pi["integral_held"] else "Integrator: running"
+            )
+            row.update({
+                "ki": pi["ki"],
+                "dt_s": pi["dt"],
+                "p_term": pi["p_term"],
+                "i_term": pi["i_term"],
+                "integral_C_s": pi["integral"],
+                "integral_held": int(pi["integral_held"]),
+                "u_requested": pi["u_requested"],
+                "u_applied": pi["u_applied"],
+            })
+        self.csv_writer.writerow(row)
         self.csv_file.flush()
 
     def redraw_plots(self):
@@ -705,6 +966,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             self.directions.pop(0)
             self.setpoints.pop(0)
             self.errors.pop(0)
+            self.p_terms.pop(0)
+            self.i_terms.pop(0)
 
         self.temperature_curve.setData(self.times, self.temperatures)
         self.setpoint_curve.setData(self.times, self.setpoints)
@@ -725,6 +988,17 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.pwm_cool_curve.setData(self.times, cool_pwms)
 
         self.error_curve.setData(self.times, self.errors)
+        self.p_term_curve.setData(self.times, self.p_terms)
+        self.i_term_curve.setData(self.times, self.i_terms)
+
+        # Both y axes are symmetric about zero so the zero line is shared.
+        # The u axis gets more headroom than the error axis so u_P, which is
+        # a scaled copy of e, sits visibly inside the error curve, not on it.
+        error_extent = max(0.5, max(abs(e) for e in self.errors)) * 1.1
+        finite_terms = [abs(u) for u in self.p_terms + self.i_terms if u == u]  # u == u drops NaN
+        term_extent = max(1.0, max(finite_terms, default=0.0)) * 1.5
+        self.error_plot.setYRange(-error_extent, error_extent, padding=0)
+        self.u_viewbox.setYRange(-term_extent, term_extent, padding=0)
 
         # The temperature axis follows only the samples still visible in the
         # rolling window. This makes small temperature changes easier to see.
@@ -766,7 +1040,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     window = TemperaturePlotWindow(port, BAUD_RATE)
-    window.resize(950, 900)
+    window.resize(1050, 1000)
     window.show()
     sys.exit(app.exec())
 
