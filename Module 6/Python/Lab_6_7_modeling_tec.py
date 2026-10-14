@@ -25,11 +25,11 @@ cooling.  Their ratio r = P_u,h/P_u,c = chi_h/chi_c defaults to 2.
 
 Run the desktop GUI from the Phys39F26 repository root:
 
-    .venv/bin/python python/Lab_6_7_modeling_tec_v3.py
+    .venv/bin/python python/Lab_6_7_modeling_tec.py
 
 Run a non-interactive two-lump demonstration and save a PNG:
 
-    .venv/bin/python python/Lab_6_7_modeling_tec_v3.py --demo
+    .venv/bin/python python/Lab_6_7_modeling_tec.py --demo
 
 No Arduino is needed. This is a mathematical model, not a hardware controller.
 """
@@ -49,7 +49,7 @@ from tkinter import messagebox, ttk
 
 
 UPDATE_INTERVAL_MS = 50
-MAX_TEC_VOLTAGE_V = 10.0
+MAX_TEC_VOLTAGE_V = 12.0
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class ModelConfig:
     measured_cooling_chi_c_per_pwm: float = 0.23
     measured_heating_chi_c_per_pwm: float = 0.46
     measured_tau_s: float = 80.0
-    tec_voltage_v: float = 10.0
+    tec_voltage_v: float = 12.0
     tec_resistance_ohm: float = 1.50
     open_loop_pwm: float = 100.0
     kp_pwm_per_c: float = 18.0
@@ -191,7 +191,9 @@ def controller_command(
 ) -> tuple[float, float, float, float, bool]:
     """Return error, P term, I term, applied command, and saturation state."""
 
-    error = config.setpoint_c - measured_temperature(state, process_mode)
+    error = controller_target_temperature(
+        config, controller_mode
+    ) - measured_temperature(state, process_mode)
 
     if controller_mode == "open_loop":
         raw_command = config.open_loop_pwm
@@ -266,7 +268,9 @@ def advance_model(
         time_s=state.time_s,
         tec_temperature_c=state.tec_temperature_c,
         measured_temperature_c=state.measured_temperature_c,
-        error_c=config.setpoint_c - measured_temperature(state, process_mode),
+        error_c=controller_target_temperature(
+            config, controller_mode
+        ) - measured_temperature(state, process_mode),
         p_pwm=p_term,
         i_pwm=i_term,
         applied_pwm=command,
@@ -286,6 +290,24 @@ def active_tec_coefficient(config: ModelConfig, command: float) -> float:
     if command >= 0.0:
         return heating_tec_coefficient(config)
     return cooling_tec_coefficient(config)
+
+
+def predicted_open_loop_steady_temperature(config: ModelConfig) -> float:
+    """Return the measured steady temperature for the open-loop command."""
+
+    return config.ambient_c + (
+        active_tec_coefficient(config, config.open_loop_pwm)
+        * config.open_loop_pwm
+        / config.heat_loss_w_per_c
+    )
+
+
+def controller_target_temperature(config: ModelConfig, controller_mode: str) -> float:
+    """Return the temperature reference used for display and error."""
+
+    if controller_mode == "open_loop":
+        return predicted_open_loop_steady_temperature(config)
+    return config.setpoint_c
 
 
 def cooling_susceptibility(config: ModelConfig) -> float:
@@ -363,6 +385,50 @@ def one_lump_pi_damping_ratio(config: ModelConfig) -> float:
         config.heat_loss_w_per_c
         + tec_coefficient * config.kp_pwm_per_c
     ) / denominator
+
+
+def two_lump_p_damping_ratio(
+    config: ModelConfig, kp_pwm_per_c: float | None = None
+) -> float:
+    """Return the two-lump damping ratio for open-loop or P dynamics."""
+
+    tec_coefficient = (
+        heating_tec_coefficient(config)
+        if config.setpoint_c >= config.ambient_c
+        else cooling_tec_coefficient(config)
+    )
+    c_tec = config.tec_capacitance_j_per_c
+    c_mass = config.measured_capacitance_j_per_c
+    coupling = config.coupling_w_per_c
+    heat_loss = config.heat_loss_w_per_c
+    kp = config.kp_pwm_per_c if kp_pwm_per_c is None else kp_pwm_per_c
+    numerator = c_tec * (coupling + heat_loss) + c_mass * coupling
+    denominator = 2.0 * math.sqrt(
+        c_tec
+        * c_mass
+        * coupling
+        * (heat_loss + tec_coefficient * kp)
+    )
+    return numerator / denominator
+
+
+def two_lump_pi_critical_integral_gain(config: ModelConfig) -> float:
+    """Return the Routh-Hurwitz stability boundary for two-lump PI control."""
+
+    tec_coefficient = (
+        heating_tec_coefficient(config)
+        if config.setpoint_c >= config.ambient_c
+        else cooling_tec_coefficient(config)
+    )
+    c_tec = config.tec_capacitance_j_per_c
+    c_mass = config.measured_capacitance_j_per_c
+    coupling = config.coupling_w_per_c
+    heat_loss = config.heat_loss_w_per_c
+    return (
+        (c_tec * (coupling + heat_loss) + c_mass * coupling)
+        * (heat_loss + tec_coefficient * config.kp_pwm_per_c)
+        / (c_tec * c_mass * tec_coefficient)
+    )
 
 
 def damping_description(value: float) -> str:
@@ -458,7 +524,7 @@ def run_demo(output: Path) -> None:
     for axis in axes:
         axis.grid(True, alpha=0.25)
 
-    figure.suptitle("Module 6 Part II v3: dimensional two-lump PI model")
+    figure.suptitle("Module 6 Part II: dimensional two-lump PI model")
     figure.tight_layout(rect=(0, 0, 1, 0.97))
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=160)
@@ -470,7 +536,7 @@ def run_demo(output: Path) -> None:
     )
 
 
-class ModelingTECv3Gui:
+class ModelingTECGui:
     """Rolling-window GUI for consistent one- and two-lump TEC models."""
 
     FIELD_SPECS = (
@@ -484,12 +550,12 @@ class ModelingTECv3Gui:
         (r"R_M", "TEC module resistance", "tec_resistance_ohm", "Ω", 0.1, 5.0, 0.05),
         (r"C", "Total thermal capacitance", "total_capacitance_j_per_c", "J/K", 5.0, 500.0, 5.0),
         (r"C_T/C", "TEC capacitance fraction", "tec_capacitance_fraction", "dimensionless", 0.05, 0.95, 0.05),
-        (r"G", "Thermal coupling", "coupling_w_per_c", "W/K", 0.1, 10.0, 0.1),
+        (r"G", "Thermal coupling", "coupling_w_per_c", "W/K", 0.1, 100.0, 1.0),
         (r"H", "Heat-loss conductance", "heat_loss_w_per_c", "W/K", 0.1, 10.0, 0.05),
         (r"P_{u,c}", "Cooling TEC coefficient", "tec_power_w_per_pwm", "W/PWM", 0.01, 0.5, 0.01),
         (r"r", "Heating/cooling ratio", "heating_to_cooling_ratio", "dimensionless", 0.25, 4.0, 0.05),
         (r"u_{\mathrm{user}}", "Open-loop command", "open_loop_pwm", "PWM", -255.0, 255.0, 1.0),
-        (r"K_p", "Proportional gain", "kp_pwm_per_c", "PWM/°C", 0.0, 100.0, 1.0),
+        (r"K_p", "Proportional gain", "kp_pwm_per_c", "PWM/°C", 0.0, 250.0, 1.0),
         (r"K_i", "Integral gain", "ki_pwm_per_c_s", "PWM/(°C s)", 0.0, 5.0, 0.02),
         (r"u_{\max}", "PWM limit", "pwm_limit", "PWM", 1.0, 255.0, 1.0),
         (r"\Delta t", "Euler time step", "dt_s", "s", 0.01, 2.0, 0.01),
@@ -518,9 +584,10 @@ class ModelingTECv3Gui:
         self.math_to_image = math_to_image
         self.math_symbol_images: list[tk.PhotoImage] = []
         self.live_symbol_widgets: dict[str, ttk.Label] = {}
+        self.live_value_frames: dict[str, ttk.Frame] = {}
         self.live_symbol_cache: dict[str, tk.PhotoImage] = {}
         self.root = root
-        self.root.title("Module 6 Part II v3: Consistent TEC Models")
+        self.root.title("Module 6: TEC Control Models")
         self.root.geometry("1540x940")
         self.root.minsize(1260, 800)
 
@@ -530,6 +597,7 @@ class ModelingTECv3Gui:
         self.controller_mode = tk.StringVar(value="p")
         self.parameter_source = tk.StringVar(value="measured")
         self.anti_windup = tk.BooleanVar(value=self.defaults.anti_windup)
+        self.mass_temperature_only = tk.BooleanVar(value=False)
         self.entries: dict[str, tk.DoubleVar] = {}
         self.field_widgets: dict[str, tuple[tk.Widget, ...]] = {}
         self.running = False
@@ -585,6 +653,17 @@ class ModelingTECv3Gui:
         )
         process_box.grid(row=row, column=1, columnspan=2, sticky="ew")
         process_box.bind("<<ComboboxSelected>>", self._change_process)
+        row += 1
+
+        self.mass_only_button = ttk.Checkbutton(
+            controls,
+            text="Plot measured mass T_m only",
+            variable=self.mass_temperature_only,
+            command=self._draw,
+        )
+        self.mass_only_button.grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(2, 4)
+        )
         row += 1
 
         ttk.Label(controls, text="Controller").grid(row=row, column=0, sticky="w")
@@ -735,6 +814,7 @@ class ModelingTECv3Gui:
                     padx=(0, 12) if column == 0 else 0,
                     pady=1,
                 )
+                self.live_value_frames[key] = value_frame
                 ttk.Label(
                     value_frame,
                     text=description,
@@ -878,7 +958,10 @@ class ModelingTECv3Gui:
         self.p_terms = [0.0]
         self.i_terms = [0.0]
         self.commands = [0.0]
-        self.errors = [self.config.setpoint_c - self.config.initial_c]
+        target_temperature = controller_target_temperature(
+            self.config, self.controller_mode.get()
+        )
+        self.errors = [target_temperature - self.config.initial_c]
         self.latest = self._current_result()
         self.running = False
         self.run_button_text.set("Resume")
@@ -1012,6 +1095,8 @@ class ModelingTECv3Gui:
 
         process = self.process_mode.get()
         controller = self.controller_mode.get()
+        target_temperature = controller_target_temperature(self.config, controller)
+        target_label = r"$T_{ss}$" if controller == "open_loop" else r"$T_{set}$"
         if process == "one_lump":
             self.ax_temperature.plot(
                 self.times,
@@ -1021,13 +1106,14 @@ class ModelingTECv3Gui:
                 label=r"$T$",
             )
         else:
-            self.ax_temperature.plot(
-                self.times,
-                self.tec_temperatures,
-                color="tab:red",
-                linewidth=1.8,
-                label=r"TEC-side $T$",
-            )
+            if not self.mass_temperature_only.get():
+                self.ax_temperature.plot(
+                    self.times,
+                    self.tec_temperatures,
+                    color="tab:red",
+                    linewidth=1.8,
+                    label=r"TEC-side $T$",
+                )
             self.ax_temperature.plot(
                 self.times,
                 self.measured_temperatures,
@@ -1036,11 +1122,11 @@ class ModelingTECv3Gui:
                 label=r"measured $T_m$",
             )
         self.ax_temperature.axhline(
-            self.config.setpoint_c,
+            target_temperature,
             color="black",
             linestyle="--",
             linewidth=1,
-            label=r"$T_{set}$",
+            label=target_label,
         )
         self.ax_temperature.set_ylabel(r"Temperature ($^\circ$C)")
         self.ax_temperature.legend(
@@ -1075,7 +1161,11 @@ class ModelingTECv3Gui:
             self.errors,
             color="tab:green",
             linewidth=2,
-            label=r"$e=T_{set}-T_{measured}$",
+            label=(
+                r"$e=T_{ss}-T_{measured}$"
+                if controller == "open_loop"
+                else r"$e=T_{set}-T_{measured}$"
+            ),
         )
         self.ax_error.axhline(0.0, color="gray", linewidth=0.8)
         self.ax_error.set_ylabel(r"Error ($^\circ$C)")
@@ -1094,13 +1184,16 @@ class ModelingTECv3Gui:
 
         visible_temperatures = [
             value
-            for time_s, value in zip(self.times, self.tec_temperatures)
-            if time_s >= left
-        ] + [
-            value
             for time_s, value in zip(self.times, self.measured_temperatures)
             if time_s >= left
-        ] + [self.config.ambient_c, self.config.setpoint_c]
+        ]
+        if process == "one_lump" or not self.mass_temperature_only.get():
+            visible_temperatures.extend(
+                value
+                for time_s, value in zip(self.times, self.tec_temperatures)
+                if time_s >= left
+            )
+        visible_temperatures.extend((self.config.ambient_c, target_temperature))
         low_t = min(visible_temperatures)
         high_t = max(visible_temperatures)
         margin_t = max(1.0, 0.1 * (high_t - low_t))
@@ -1129,14 +1222,37 @@ class ModelingTECv3Gui:
 
         cooling_chi = cooling_susceptibility(self.config)
         heating_chi = heating_susceptibility(self.config)
-        susceptibility = open_loop_susceptibility(self.config)
+        susceptibility = (
+            active_tec_coefficient(self.config, self.config.open_loop_pwm)
+            / self.config.heat_loss_w_per_c
+            if controller == "open_loop"
+            else open_loop_susceptibility(self.config)
+        )
+        if controller == "open_loop":
+            thermal_input = r"P_u(u)u_{user}"
+            controller_lines = (
+                rf"$u=u_{{user}}={self.config.open_loop_pwm:.3g}\,\mathrm{{PWM}}$",
+            )
+        elif controller == "p":
+            thermal_input = r"P_u(u)K_p e"
+            controller_lines = (
+                r"$e=T_{set}-T_{meas}$",
+                r"$u=K_p e$",
+            )
+        else:
+            thermal_input = r"P_u(u)\left(K_p e+K_i\int e\,dt\right)"
+            controller_lines = (
+                r"$e=T_{set}-T_{meas}$",
+                r"$u=K_p e+K_i\int e\,dt$",
+            )
+
         if process == "one_lump":
             self.left_equations.set_text(
                 r"$\bf{Thermal\ model}$"
                 "\n"
                 r"$C=C_T+C_m$"
                 "\n"
-                r"$C\frac{dT}{dt}=P_u(u)u-H(T-T_{amb})$"
+                rf"$C\frac{{dT}}{{dt}}={thermal_input}-H(T-T_{{amb}})$"
                 "\n"
                 rf"$\chi_c=\frac{{P_{{u,c}}}}{{H}}={cooling_chi:.3g},\quad"
                 rf"\chi_h=\frac{{P_{{u,h}}}}{{H}}={heating_chi:.3g}\,^\circ\mathrm{{C/PWM}}$"
@@ -1151,7 +1267,7 @@ class ModelingTECv3Gui:
             self.left_equations.set_text(
                 r"$\bf{Thermal\ model}$"
                 "\n"
-                r"$C_T\frac{dT}{dt}=P_u(u)u-G(T-T_m)$"
+                rf"$C_T\frac{{dT}}{{dt}}={thermal_input}-G(T-T_m)$"
                 "\n"
                 r"$C_m\frac{dT_m}{dt}=G(T-T_m)-H(T_m-T_{amb})$"
                 "\n"
@@ -1163,19 +1279,57 @@ class ModelingTECv3Gui:
                 rf"$\tau_{{fast}}={tau_fast:.3g}\,\mathrm{{s}},\quad\tau_{{slow}}={tau_slow:.3g}\,\mathrm{{s}}$"
             )
 
-        zeta = one_lump_pi_damping_ratio(self.config)
-        zeta_text = r"\infty" if math.isinf(zeta) else f"{zeta:.3f}"
-        self.right_equations.set_text(
-            r"$\bf{Controller}$"
-            "\n"
-            rf"Open loop: $u=u_{{user}}={self.config.open_loop_pwm:.3g}\,\mathrm{{PWM}}$"
-            "\n"
-            r"P control: $e=T_{set}-T_{meas}$, $u_P=K_p e$"
-            "\n"
-            r"PI control: $u=u_P+u_I=K_p e+K_i\int e\,dt$"
-            "\n"
-            rf"One-lump PI: $\zeta={zeta_text}$ ({damping_description(zeta)})"
-        )
+        right_lines = [r"$\bf{Selected\ controller}$", "", "", *controller_lines]
+        zeta: float | None = None
+        if process == "one_lump" and controller == "pi":
+            zeta = one_lump_pi_damping_ratio(self.config)
+            zeta_text = r"\infty" if math.isinf(zeta) else f"{zeta:.3f}"
+            right_lines.extend(
+                (
+                    r"One-lump PI:",
+                    r"$\zeta_{1L,PI}=\frac{H+P_uK_p}"
+                    r"{2\sqrt{CP_uK_i}}$"
+                    rf"$={zeta_text}$ ({damping_description(zeta)})",
+                )
+            )
+        elif process == "two_lump" and controller == "p":
+            zeta = two_lump_p_damping_ratio(self.config)
+            right_lines.extend(
+                (
+                    r"Two-lump P:",
+                    r"$\zeta_{2L,P}=\frac{C_T(G+H)+C_mG}"
+                    r"{2\sqrt{C_TC_mG(H+P_uK_p)}}$"
+                    rf"$={zeta:.3f}$ ({damping_description(zeta)})",
+                )
+            )
+        elif process == "two_lump" and controller == "open_loop":
+            zeta = two_lump_p_damping_ratio(self.config, kp_pwm_per_c=0.0)
+            right_lines.extend(
+                (
+                    r"Two-lump open loop:",
+                    r"$\zeta_{2L,OL}=\frac{C_T(G+H)+C_mG}"
+                    r"{2\sqrt{C_TC_mGH}}$"
+                    rf"$={zeta:.3f}$ ({damping_description(zeta)})",
+                )
+            )
+        elif process == "two_lump" and controller == "pi":
+            critical_ki = two_lump_pi_critical_integral_gain(self.config)
+            integral_ratio = self.config.ki_pwm_per_c_s / critical_ki
+            if integral_ratio < 1.0 - 1e-3:
+                stability = "stable"
+            elif integral_ratio > 1.0 + 1e-3:
+                stability = "unstable"
+            else:
+                stability = "marginal"
+            right_lines.extend(
+                (
+                    r"Two-lump PI stability:",
+                    r"$K_{i,crit}=\frac{[C_T(G+H)+C_mG](H+P_uK_p)}"
+                    r"{C_TC_mP_u}$",
+                    rf"$K_i/K_{{i,crit}}={integral_ratio:.3f}$ ({stability})",
+                )
+            )
+        self.right_equations.set_text("\n".join(right_lines))
 
         current_measured = measured_temperature(self.state, process)
         if process == "one_lump":
@@ -1209,7 +1363,7 @@ class ModelingTECv3Gui:
         self.live_susceptibility.set(
             f"= {cooling_chi:.2f}; {heating_chi:.2f} °C/PWM"
         )
-        delta_t = self.config.setpoint_c - self.config.ambient_c
+        delta_t = target_temperature - self.config.ambient_c
         if susceptibility > 0.0:
             required_command = delta_t / susceptibility
             self.live_required_command.set(
@@ -1222,10 +1376,15 @@ class ModelingTECv3Gui:
         self.live_p_prediction.set(
             f"= {predicted_p_droop(self.config):7.2f} °C"
         )
-        zeta_display = "∞" if math.isinf(zeta) else f"{zeta:.2f}"
-        self.live_damping.set(
-            f"= {zeta_display} ({damping_description(zeta)})"
-        )
+        if zeta is None:
+            self.live_damping.set("")
+            self.live_value_frames["damping"].grid_remove()
+        else:
+            self.live_value_frames["damping"].grid()
+            zeta_display = "∞" if math.isinf(zeta) else f"{zeta:.2f}"
+            self.live_damping.set(
+                f"= {zeta_display} ({damping_description(zeta)})"
+            )
         run_state = "Running" if self.running else "Paused"
         self.live_status.set(
             f"{run_state} | {process.replace('_', ' ')} | "
@@ -1259,8 +1418,20 @@ class ModelingTECv3Gui:
         ):
             enabled[attribute] = not measured_parameters
         enabled["open_loop_pwm"] = controller == "open_loop"
+        enabled["setpoint_c"] = controller != "open_loop"
         enabled["kp_pwm_per_c"] = controller in {"p", "pi"}
         enabled["ki_pwm_per_c_s"] = controller == "pi"
+
+        ki_slider = self.field_widgets["ki_pwm_per_c_s"][2]
+        ki_upper = max(5.0, self.entries["ki_pwm_per_c_s"].get())
+        if process == "two_lump" and controller == "pi":
+            critical_ki = two_lump_pi_critical_integral_gain(self.config)
+            ki_upper = max(ki_upper, math.ceil(1.25 * critical_ki))
+        ki_slider.configure(to=ki_upper)
+
+        self.mass_only_button.configure(
+            state="normal" if process == "two_lump" else "disabled"
+        )
         for attribute, widgets in self.field_widgets.items():
             state = "normal" if enabled[attribute] else "disabled"
             for widget in widgets:
@@ -1281,7 +1452,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("python/Lab_6_7_modeling_tec_v3_demo.png"),
+        default=Path("python/Lab_6_7_modeling_tec_demo.png"),
         help="output path used with --demo",
     )
     args = parser.parse_args()
@@ -1290,7 +1461,7 @@ def main() -> None:
         return
 
     root = tk.Tk()
-    ModelingTECv3Gui(root)
+    ModelingTECGui(root)
     root.mainloop()
 
 
