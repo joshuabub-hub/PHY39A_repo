@@ -200,7 +200,11 @@ def controller_command(
         p_term = 0.0
         i_term = 0.0
     elif controller_mode in {"p", "pi"}:
-        p_term = config.kp_pwm_per_c * error
+        p_term = clamp(
+            config.kp_pwm_per_c * error,
+            -config.pwm_limit,
+            config.pwm_limit,
+        )
         if controller_mode == "pi":
             if advance_integral:
                 proposed_integral = state.integral_error_c_s + error * config.dt_s
@@ -460,8 +464,10 @@ def validate_config(config: ModelConfig) -> None:
         raise ValueError("TEC coefficient P_u cannot be negative.")
     if config.heating_to_cooling_ratio <= 0.0:
         raise ValueError("Heating/cooling susceptibility ratio r must be positive.")
-    if config.kp_pwm_per_c < 0.0 or config.ki_pwm_per_c_s < 0.0:
-        raise ValueError("Kp and Ki must be zero or positive.")
+    if not math.isfinite(config.kp_pwm_per_c) or config.kp_pwm_per_c < 0.0:
+        raise ValueError("Kp must be finite and zero or positive.")
+    if config.ki_pwm_per_c_s < 0.0:
+        raise ValueError("Ki must be zero or positive.")
 
     fastest_time = min(
         config.one_lump_capacitance_j_per_c / config.heat_loss_w_per_c,
@@ -555,7 +561,7 @@ class ModelingTECGui:
         (r"P_{u,c}", "Cooling TEC coefficient", "tec_power_w_per_pwm", "W/PWM", 0.01, 0.5, 0.01),
         (r"r", "Heating/cooling ratio", "heating_to_cooling_ratio", "dimensionless", 0.25, 4.0, 0.05),
         (r"u_{\mathrm{user}}", "Open-loop command", "open_loop_pwm", "PWM", -255.0, 255.0, 1.0),
-        (r"K_p", "Proportional gain", "kp_pwm_per_c", "PWM/°C", 0.0, 250.0, 1.0),
+        (r"K_p", "Proportional gain", "kp_pwm_per_c", "PWM/°C", None, None, None),
         (r"K_i", "Integral gain", "ki_pwm_per_c_s", "PWM/(°C s)", 0.0, 5.0, 0.02),
         (r"u_{\max}", "PWM limit", "pwm_limit", "PWM", 1.0, 255.0, 1.0),
         (r"\Delta t", "Euler time step", "dt_s", "s", 0.01, 2.0, 0.01),
@@ -706,31 +712,37 @@ class ModelingTECGui:
             field = ttk.Frame(controls)
             field.grid(row=row, column=1, sticky="ew", padx=(7, 5))
             field.columnconfigure(0, weight=1)
-            slider = tk.Scale(
-                field,
-                from_=low,
-                to=high,
-                resolution=resolution,
-                orient=tk.HORIZONTAL,
-                variable=variable,
-                showvalue=False,
-                highlightthickness=0,
-                length=205,
-            )
-            slider.grid(row=0, column=0, sticky="ew")
-            entry = ttk.Entry(field, textvariable=variable, width=9)
-            entry.grid(row=0, column=1, padx=(5, 0))
-            entry.bind("<Return>", self._apply_parameter_edit)
-            entry.bind("<KP_Enter>", self._apply_parameter_edit)
             units_widget = ttk.Label(controls, text=units)
             units_widget.grid(row=row, column=2, sticky="w")
-            self.field_widgets[attribute] = (
-                symbol_widget,
-                description_widget,
-                slider,
-                entry,
-                units_widget,
-            )
+            if high is None:
+                entry = ttk.Entry(field, textvariable=variable, width=9)
+                entry.grid(row=0, column=0, sticky="ew")
+                widgets = (symbol_widget, description_widget, entry, units_widget)
+            else:
+                slider = tk.Scale(
+                    field,
+                    from_=low,
+                    to=high,
+                    resolution=resolution,
+                    orient=tk.HORIZONTAL,
+                    variable=variable,
+                    showvalue=False,
+                    highlightthickness=0,
+                    length=205,
+                )
+                slider.grid(row=0, column=0, sticky="ew")
+                entry = ttk.Entry(field, textvariable=variable, width=9)
+                entry.grid(row=0, column=1, padx=(5, 0))
+                widgets = (
+                    symbol_widget,
+                    description_widget,
+                    slider,
+                    entry,
+                    units_widget,
+                )
+            entry.bind("<Return>", self._apply_parameter_edit)
+            entry.bind("<KP_Enter>", self._apply_parameter_edit)
+            self.field_widgets[attribute] = widgets
             row += 1
 
         ttk.Checkbutton(
