@@ -466,8 +466,8 @@ def validate_config(config: ModelConfig) -> None:
         raise ValueError("Heating/cooling susceptibility ratio r must be positive.")
     if not math.isfinite(config.kp_pwm_per_c) or config.kp_pwm_per_c < 0.0:
         raise ValueError("Kp must be finite and zero or positive.")
-    if config.ki_pwm_per_c_s < 0.0:
-        raise ValueError("Ki must be zero or positive.")
+    if not 0.0 <= config.ki_pwm_per_c_s <= 10.0:
+        raise ValueError("Ki must be between 0 and 10.")
 
     fastest_time = min(
         config.one_lump_capacitance_j_per_c / config.heat_loss_w_per_c,
@@ -562,7 +562,7 @@ class ModelingTECGui:
         (r"r", "Heating/cooling ratio", "heating_to_cooling_ratio", "dimensionless", 0.25, 4.0, 0.05),
         (r"u_{\mathrm{user}}", "Open-loop command", "open_loop_pwm", "PWM", -255.0, 255.0, 1.0),
         (r"K_p", "Proportional gain", "kp_pwm_per_c", "PWM/°C", None, None, None),
-        (r"K_i", "Integral gain", "ki_pwm_per_c_s", "PWM/(°C s)", 0.0, 5.0, 0.02),
+        (r"K_i", "Integral gain", "ki_pwm_per_c_s", "PWM/(°C s)", 0.0, 10.0, 0.02),
         (r"u_{\max}", "PWM limit", "pwm_limit", "PWM", 1.0, 255.0, 1.0),
         (r"\Delta t", "Euler time step", "dt_s", "s", 0.01, 2.0, 0.01),
         (r"t_{\mathrm{window}}", "Rolling window", "window_s", "s", 30.0, 600.0, 10.0),
@@ -1433,13 +1433,6 @@ class ModelingTECGui:
         enabled["setpoint_c"] = controller != "open_loop"
         enabled["kp_pwm_per_c"] = controller in {"p", "pi"}
         enabled["ki_pwm_per_c_s"] = controller == "pi"
-
-        ki_slider = self.field_widgets["ki_pwm_per_c_s"][2]
-        ki_upper = max(5.0, self.entries["ki_pwm_per_c_s"].get())
-        if process == "two_lump" and controller == "pi":
-            critical_ki = two_lump_pi_critical_integral_gain(self.config)
-            ki_upper = max(ki_upper, math.ceil(1.25 * critical_ki))
-        ki_slider.configure(to=ki_upper)
 
         self.mass_only_button.configure(
             state="normal" if process == "two_lump" else "disabled"
