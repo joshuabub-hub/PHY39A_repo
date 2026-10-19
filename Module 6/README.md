@@ -14,20 +14,20 @@ Differences between model and apparatus: As close as we can get to simulating th
 
 | Run | Controller | Choice | Temp Set Point | Starting Temp | Observation |
 |-----|------------|--------|----------------|---------------|-------------|
-| 1   |  P         |    5   |           30ºC |          22ºC | Large droop ~2ºC |
-| 2   | P          | 50     | 30ºC | 22ºC | overshot then settled to set point after short overdamped oscillation |
-| 3   | P          | 500    | 30ºC | 22ºC | |
-| 4   | PI         | Intermediate Kp, low Ki | 30ºC | 22ºC | |
-| 5   | PI         | High Kp, intermediate Ki | 30ºC | 22ºC | |
-| 6   | PI         | High Kp, high Ki | 30ºC | 22ºC | |
+| 1   |  P         |    Kp = 5   |           30ºC |          22ºC | Large droop ~2ºC |
+| 2   | P          | Kp = 50     | 30ºC | 22ºC | overshot then settled to set point after short overdamped oscillation, small error ~0.3ºC |
+| 3   | P          | Kp = 500    | 30ºC | 22ºC | overshot then settled into small oscillations, PWM cooling periodically saturates|
+| 4   | PI         | Kp = 40, Ki = 0.1 | 30ºC | 22ºC | overshot into overdamped oscillation, settled with small steady state error ~0.30ºC which was decreasing slowly|
+| 5   | PI         | Kp = 40, Ki = 0.5| 30ºC | 22ºC | overshot into overdamped oscillation, PWM briefly saturated, settled with small steady state error ~0.15ºC, which was decreasing slowly |
+| 6   | PI         | Kp = 40, Ki = 10 | 30ºC | 22ºC | overshot (more than previous run) into overdamped oscillation (more periods than previous run), PWM initially saturates, settled with ~0 error |
 
 **Cooling**
 
 | Run | Controller | Choice | Temp Set Point | Starting Temp | Observation |
 |-----|------------|--------|----------------|---------------|-------------|
-| 1 | P | 5 | 15ºC | 22ºC | |
-| 2 | P | 50 | 15ºC | 22ºC | |
-| 3 | P | 500 | 15ºC | 22ºC | |
-| 4 | PI | Intermediate Kp, low Ki | 15ºC | 22ºC | |
-| 5 | PI | High Kp, intermediate Ki | 15ºC | 22ºC | |
-| 6 | PI | High Kp, high Ki | 15ºC | 22ºC | |
+| 1 | P | 5 | 15ºC | 22ºC | No overshoot, slowly approached 15ºC with large steady state error ~ 5ºC|
+| 2 | P | 50 | 15ºC | 22ºC | No overshoot, quickly dropped to 16ºC and slowly progressed below with some droop|
+| 3 | P | 500 | 15ºC | 22ºC | briefly overshot into small oscilations, PWM initially saturates|
+| 4 | PI |  Kp = 40, Ki = 0.1| 15ºC | 22ºC | Exp decay to ~16ºC, slow decrease after that|
+| 5 | PI | Kp = 40, Ki = 0.5| 15ºC | 22ºC | exp decay to ~15ºC, steady state error ~0.2ºC, no overshoot from PI control trials yet|
+| 6 | PI | Kp = 40, Ki = 10 | 15ºC | 22ºC | Overshot slightly, PWM saturated briefly, settled without oscillations w/ steady state error ~0.01ºC |
