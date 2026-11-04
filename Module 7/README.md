@@ -42,3 +42,28 @@ venv/bin/python Python/calibrate_thermistors_mod7.py data/raw_mod7_<run>.csv --t
 ```
 
 Outputs: `_table.csv` (a, b, n, range, residual mean/std/max), `_corrected.csv` (all raw columns + `rod1_corrected_C`…`rod5_corrected_C`), `_fits.png`, `_residuals.png`.
+
+## Step response and stationary profile (run `raw_mod7_20261104_091551`)
+
+Setpoint stepped 20 → 45 °C at t = 788.9 s (PI, Kp = 45, Ki = 0.5). Rod positions from rod 1's hole: 0, 0.025, 0.05, 0.10, 0.15 m (hand-measured, ±3 mm assumed). L = 0.283 m, d = 0.011 m. T∞ = 26.4 °C from the first 30 s of the log (room temperature was not logged, ±1 °C assumed).
+
+Scripts (run with `~/.venvs/phy39a_repo/bin/python`, from the repo root):
+- `Python/plot_step_response_mod7.py` → `data/step_response_mod7.png` (all six temperatures; commanded TEC, measured TEC and rod T(0,t)) and `data/step_boundary_condition_mod7.csv`.
+- `Python/fit_stationary_profile_mod7.py` → `data/stationary_profile_mod7.png` (θ(x) with error bars, both fits, residuals) and `data/stationary_profile_mod7.csv`.
+
+Farther sensors respond later and with smaller rises: heat diffuses along the rod (delay ~ x²/α) and side loss removes heat along the way. Time to 50% of rise after the step, rods 1–5: about 53, 89, 129, 226, 334 s.
+
+Steady-state check, data to t = 3777 s, criterion |dT/dt| < 0.02 °C/min on every rod for 10 min: **not met**. Last-10-min drift, rods 1–5: +0.011, +0.015, +0.018, +0.024, +0.029 °C/min (TEC steady). The last window that passed ended at 3277 s. The profile below is a near-stationary average of the final 5 min (3477–3777 s), so treat it as provisional.
+
+Predicted (planning values h = 10 W/m²K, k = 167 W/mK; computed after the run): m = 4.67 m⁻¹, 1/m = 0.214 m, mL = 1.32.
+
+| Model | m (m⁻¹) | 1/m (m) | χ²/dof |
+|-------|---------|---------|--------|
+| Finite, insulated tip | 5.35 ± 0.23 | 0.187 ± 0.008 | 1.13/3 |
+| Semi-infinite | 4.33 ± 0.28 | 0.231 ± 0.015 | 3.07/3 |
+
+- Ignoring the tip lowers m by 1.02 m⁻¹ (19%), 4.5× the finite-fit uncertainty, so the rod is not semi-infinite (fitted mL ≈ 1.5).
+- Changing T∞ by ±1 °C shifts m by about ±0.4 m⁻¹, larger than the fit error.
+- Measured θ at rods 2–5 is 0.6–0.9 °C below the prediction; fitted m is 15% above predicted (implied h ≈ 13 W/m²K at k = 167).
+- Fitted m gives Bi⊥ ≈ 2×10⁻⁴ ≪ 1, so each cross section can be treated as one temperature.
+- Unresolved: room-temperature drift (all rods dipped near 2000 s), rod 1 contact offset below the TEC, and that the sensors only reach x = 0.15 m so the tip condition is assumed, not measured.

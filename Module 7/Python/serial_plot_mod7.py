@@ -87,11 +87,29 @@ PWM_MAX = 255
 # the top-left) on an opaque light-gray box with a dark border and dark text.
 LEGEND_OPTIONS = dict(
     offset=(10, 10),
-    labelTextSize="11pt",
+    labelTextSize="12pt",
     labelTextColor=(20, 20, 20),
     brush=pg.mkBrush(235, 235, 235, 240),
     pen=pg.mkPen(color=(90, 90, 90), width=1),
 )
+
+CONTROL_PANEL_WIDTH = 430  # left column holding all readouts and controls
+PLOT_STRETCH = (5, 3, 3)  # relative heights of the temperature, PWM and error plots
+LABEL_STYLE = {"font-size": "13pt", "color": "#202020"}
+TICK_FONT_PT = 12
+
+
+def style_plot(plot_widget, title):
+    """Apply the shared title, tick font and dark axis colors to one plot."""
+    plot_widget.setTitle(title, size="14pt", color="#202020")
+    tick_font = QtGui.QFont()
+    tick_font.setPointSize(TICK_FONT_PT)
+    item = plot_widget.getPlotItem()
+    for name in ("left", "bottom", "right"):
+        axis = item.getAxis(name)
+        axis.setTickFont(tick_font)
+        axis.setPen(pg.mkPen(color=(40, 40, 40), width=1))
+        axis.setTextPen(pg.mkPen(color=(20, 20, 20)))
 
 # P-control defaults. Kp is in PWM counts per degree C of error - e.g. with
 # the default Kp below, a 10 C error commands a PWM magnitude of only 10,
@@ -129,8 +147,8 @@ PI_LOG_CSV_PREFIX = "pi_log_mod7"
 # Fixed label, color and line width for every temperature trace. The same
 # colors are used for the live readouts above the plot, so a number and its
 # trace always match. TEC is thicker because it is the feedback channel.
-TEC_TRACE_WIDTH = 3
-ROD_TRACE_WIDTH = 1.5
+TEC_TRACE_WIDTH = 4
+ROD_TRACE_WIDTH = 2.5
 TEMPERATURE_TRACES = [
     # (record field, label,  color (R, G, B))
     ("tec_C",  "TEC",   (0, 0, 0)),
@@ -435,20 +453,35 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
 
-        temperatures_row = QtWidgets.QHBoxLayout()
-        temperatures_row.addWidget(self._build_temperature_readings_box(), stretch=1)
-        temperatures_row.addWidget(self._build_serial_lines_box())
-        main_layout.addLayout(temperatures_row)
-        main_layout.addWidget(self._build_live_readings_box())
-        main_layout.addWidget(self._build_pi_readings_box())
-        main_layout.addWidget(self._build_mode_box())
-        main_layout.addWidget(self._build_manual_control_box())
-        main_layout.addWidget(self._build_pi_control_box())
-        main_layout.addWidget(self._build_temperature_plot())
-        main_layout.addWidget(self._build_pwm_plot())
-        main_layout.addWidget(self._build_error_plot())
+        # Left column: every readout and control, scrollable on small screens.
+        controls = QtWidgets.QWidget()
+        controls_layout = QtWidgets.QVBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addWidget(self._build_temperature_readings_box())
+        controls_layout.addWidget(self._build_live_readings_box())
+        controls_layout.addWidget(self._build_pi_readings_box())
+        controls_layout.addWidget(self._build_mode_box())
+        controls_layout.addWidget(self._build_manual_control_box())
+        controls_layout.addWidget(self._build_pi_control_box())
+        controls_layout.addWidget(self._build_serial_lines_box())
+        controls_layout.addStretch(1)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(controls)
+        scroll.setFixedWidth(CONTROL_PANEL_WIDTH)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        main_layout.addWidget(scroll)
+
+        # Right column: the three plots take all remaining space.
+        plots_layout = QtWidgets.QVBoxLayout()
+        for plot, stretch in zip(
+            (self._build_temperature_plot(), self._build_pwm_plot(), self._build_error_plot()),
+            PLOT_STRETCH,
+        ):
+            plots_layout.addWidget(plot, stretch=stretch)
+        main_layout.addLayout(plots_layout, stretch=1)
 
         # Controls are disabled until the serial port actually opens, so we
         # can't try to write to a port that isn't ready yet.
@@ -492,17 +525,17 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         label, so on_measurement() can update them all in one loop.
         """
         box = QtWidgets.QGroupBox("Temperatures (C)")
-        layout = QtWidgets.QHBoxLayout(box)
+        layout = QtWidgets.QGridLayout(box)
 
         self.temperature_labels = {}
-        for field_name, label_text, color in TEMPERATURE_TRACES:
+        for index, (field_name, label_text, color) in enumerate(TEMPERATURE_TRACES):
             label = QtWidgets.QLabel(f"{label_text}: --")
             weight = "bold" if field_name == "tec_C" else "normal"
             label.setStyleSheet(
-                f"font-size: 14pt; font-weight: {weight}; color: rgb{color};"
+                f"font-size: 15pt; font-weight: {weight}; color: rgb{color};"
             )
             self.temperature_labels[field_name] = label
-            layout.addWidget(label)
+            layout.addWidget(label, index // 2, index % 2)
 
         return box
 
@@ -525,7 +558,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         self.last_rejected_label = QtWidgets.QLabel("Last rejected: --")
         self.last_rejected_label.setStyleSheet("color: gray;")
-        self.last_rejected_label.setMaximumWidth(360)
+        self.last_rejected_label.setWordWrap(True)
         layout.addWidget(self.last_rejected_label)
 
         self.raw_file_label = QtWidgets.QLabel("Raw CSV: --")
@@ -540,7 +573,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         the setpoint/error this script is currently working from.
         """
         box = QtWidgets.QGroupBox("Live Readings")
-        layout = QtWidgets.QHBoxLayout(box)
+        layout = QtWidgets.QGridLayout(box)
 
         # QLabel is just a piece of text on screen. We keep a reference to
         # each one (self.pwm_label, etc.) so we can update its text
@@ -560,9 +593,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             self.safety_label,
             self.time_label,
         )
-        for label in labels:
-            label.setStyleSheet("font-size: 14pt;")
-            layout.addWidget(label)
+        for index, label in enumerate(labels):
+            label.setStyleSheet("font-size: 13pt;")
+            layout.addWidget(label, index // 2, index % 2)
 
         return box
 
@@ -572,7 +605,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         applied (clamped, signed) command, and whether anti-windup held q.
         """
         box = QtWidgets.QGroupBox("PI Terms (latest step)")
-        layout = QtWidgets.QHBoxLayout(box)
+        layout = QtWidgets.QGridLayout(box)
 
         self.pi_error_label = QtWidgets.QLabel("e: -- C")
         self.p_term_label = QtWidgets.QLabel("u_P: --")
@@ -591,9 +624,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             self.u_applied_label,
             self.integrator_label,
         )
-        for label in labels:
+        for index, label in enumerate(labels):
             label.setStyleSheet("font-size: 12pt;")
-            layout.addWidget(label)
+            layout.addWidget(label, index // 2, index % 2)
 
         return box
 
@@ -622,7 +655,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         box. Only takes effect while Control Mode is Manual.
         """
         self.manual_control_box = QtWidgets.QGroupBox("Manual Control")
-        layout = QtWidgets.QHBoxLayout(self.manual_control_box)
+        layout = QtWidgets.QVBoxLayout(self.manual_control_box)
 
         # --- Heat/Cool switch -------------------------------------------------
         # Two radio buttons in the same QButtonGroup act like a switch: only
@@ -675,7 +708,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """
         self.pi_control_box = QtWidgets.QGroupBox("PI Control")
         box_layout = QtWidgets.QVBoxLayout(self.pi_control_box)
-        layout = QtWidgets.QHBoxLayout()
+        layout = QtWidgets.QFormLayout()
         box_layout.addLayout(layout)
 
         self.setpoint_spinbox = QtWidgets.QDoubleSpinBox()
@@ -691,11 +724,11 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.kp_spinbox.setSingleStep(0.1)
         self.kp_spinbox.setValue(DEFAULT_KP)
 
-        layout.addWidget(QtWidgets.QLabel("Setpoint (Tset):"))
-        layout.addWidget(self.setpoint_spinbox)
-        layout.addWidget(QtWidgets.QLabel("Kp:"))
-        layout.addWidget(self.kp_spinbox)
-        layout.addWidget(QtWidgets.QLabel("u = Kp*e + Ki*q; sign(u) -> direction, |u| -> PWM"))
+        layout.addRow("Setpoint (Tset):", self.setpoint_spinbox)
+        layout.addRow("Kp:", self.kp_spinbox)
+        formula_label = QtWidgets.QLabel("u = Kp*e + Ki*q; sign(u) -> direction, |u| -> PWM")
+        formula_label.setWordWrap(True)
+        layout.addRow(formula_label)
 
         # --- Ki slider + text box ------------------------------------------
         # QSlider only holds integers, so it stores Ki * KI_SLIDER_SCALE.
@@ -729,16 +762,18 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         ki_layout.addWidget(QtWidgets.QLabel(f"Ki ({KI_MIN:g}-{KI_MAX:g}):"))
         ki_layout.addWidget(self.ki_slider)
         ki_layout.addWidget(self.ki_spinbox)
-        ki_layout.addWidget(self.p_only_button)
-        ki_layout.addWidget(self.reset_integral_button)
+        button_layout = QtWidgets.QHBoxLayout()
+        button_layout.addWidget(self.p_only_button)
+        button_layout.addWidget(self.reset_integral_button)
+        box_layout.addLayout(button_layout)
 
         return self.pi_control_box
 
     def _build_temperature_plot(self):
         self.temperature_plot = pg.PlotWidget()
         self.temperature_plot.setBackground("w")
-        self.temperature_plot.setLabel("left", "Temperature", units="C")
-        self.temperature_plot.setLabel("bottom", "Time", units="s")
+        self.temperature_plot.setLabel("left", "Temperature", units="C", **LABEL_STYLE)
+        self.temperature_plot.setLabel("bottom", "Time", units="s", **LABEL_STYLE)
         self.temperature_plot.showGrid(x=True, y=True)
         # The legend must exist before the curves so plot(name=...) adds them.
         # Four columns keeps its seven entries to two short rows.
@@ -754,8 +789,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
                 pen=pg.mkPen(color=color, width=width), name=label_text
             )
         self.setpoint_curve = self.temperature_plot.plot(
-            pen=pg.mkPen(color="g", width=2, style=QtCore.Qt.DashLine), name="Setpoint"
+            pen=pg.mkPen(color="g", width=3, style=QtCore.Qt.DashLine), name="Setpoint"
         )
+        style_plot(self.temperature_plot, "Temperatures")
         return self.temperature_plot
 
     def _build_pwm_plot(self):
@@ -765,18 +801,19 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """
         self.pwm_plot = pg.PlotWidget()
         self.pwm_plot.setBackground("w")
-        self.pwm_plot.setLabel("left", "PWM", units="")
-        self.pwm_plot.setLabel("bottom", "Time", units="s")
+        self.pwm_plot.setLabel("left", "PWM", units="", **LABEL_STYLE)
+        self.pwm_plot.setLabel("bottom", "Time", units="s", **LABEL_STYLE)
         self.pwm_plot.showGrid(x=True, y=True)
         self.pwm_plot.setYRange(PWM_MIN, PWM_MAX, padding=0)
         # The legend must exist before the curves so plot(name=...) adds them.
         self.pwm_plot.addLegend(**LEGEND_OPTIONS)
         self.pwm_heat_curve = self.pwm_plot.plot(
-            pen=pg.mkPen(color="r", width=2), name="Heating"
+            pen=pg.mkPen(color="r", width=3), name="Heating"
         )
         self.pwm_cool_curve = self.pwm_plot.plot(
-            pen=pg.mkPen(color="b", width=2), name="Cooling"
+            pen=pg.mkPen(color="b", width=3), name="Cooling"
         )
+        style_plot(self.pwm_plot, "PWM command")
         return self.pwm_plot
 
     def _build_error_plot(self):
@@ -789,8 +826,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.error_plot = pg.PlotWidget()
         self.error_plot.setBackground("w")
         plot_item = self.error_plot.getPlotItem()
-        plot_item.setLabel("left", "Error (Tset - T)", units="C")
-        plot_item.setLabel("bottom", "Time", units="s")
+        plot_item.setLabel("left", "Error (Tset - T)", units="C", **LABEL_STYLE)
+        plot_item.setLabel("bottom", "Time", units="s", **LABEL_STYLE)
         plot_item.showGrid(x=True, y=True)
         zero_line = pg.InfiniteLine(
             pos=0, angle=0, pen=pg.mkPen(color=(128, 128, 128), style=QtCore.Qt.DashLine)
@@ -799,14 +836,14 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         legend = plot_item.addLegend(**LEGEND_OPTIONS)
         self.error_curve = plot_item.plot(
-            pen=pg.mkPen(color="orange", width=2), name="Error e"
+            pen=pg.mkPen(color="orange", width=3), name="Error e"
         )
 
         self.u_viewbox = pg.ViewBox()
         plot_item.showAxis("right")
         plot_item.scene().addItem(self.u_viewbox)
         plot_item.getAxis("right").linkToView(self.u_viewbox)
-        plot_item.getAxis("right").setLabel("u_P, u_I (PWM)")
+        plot_item.getAxis("right").setLabel("u_P, u_I (PWM)", **LABEL_STYLE)
         self.u_viewbox.setXLink(plot_item)
         self.u_viewbox.setZValue(plot_item.vb.zValue() + 1)
 
@@ -820,11 +857,11 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # u_P = Kp * e has the same shape as e, so it is dashed and drawn on
         # top of the error curve; otherwise it can hide exactly behind it.
         self.p_term_curve = pg.PlotDataItem(
-            pen=pg.mkPen(color=(128, 0, 160), width=2, style=QtCore.Qt.DashLine),
+            pen=pg.mkPen(color=(128, 0, 160), width=3, style=QtCore.Qt.DashLine),
             connect="finite",
         )
         self.i_term_curve = pg.PlotDataItem(
-            pen=pg.mkPen(color=(0, 140, 140), width=2), connect="finite"
+            pen=pg.mkPen(color=(0, 140, 140), width=3), connect="finite"
         )
         self.u_viewbox.addItem(self.p_term_curve)
         self.u_viewbox.addItem(self.i_term_curve)
@@ -832,6 +869,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # by hand.
         legend.addItem(self.p_term_curve, "u_P = Kp*e")
         legend.addItem(self.i_term_curve, "u_I = Ki*q")
+        style_plot(self.error_plot, "Error and PI terms")
         return self.error_plot
 
     # -----------------------------------------------------------------
@@ -1285,7 +1323,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     window = TemperaturePlotWindow(port, BAUD_RATE)
-    window.resize(1050, 1000)
+    window.resize(1700, 980)
     window.show()
     sys.exit(app.exec())
 
