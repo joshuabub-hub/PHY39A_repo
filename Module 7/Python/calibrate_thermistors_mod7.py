@@ -10,7 +10,10 @@ over a calibration range you choose, by Arduino time or by TEC temperature.
 
 Outputs (all NEW files in Module 7/data/calibration/; the raw CSV is only
 ever opened for reading and is never changed):
-  <raw name>_cal_<run time>_table.csv      a_i, b_i, point count, range, residual stats
+  <raw name>_cal_<run time>_stats.csv      per thermistor: n, mean, std, std error,
+                                           min, max, offset from tec_C
+  <raw name>_cal_<run time>_vs_time.png    all six thermistors vs time, one graph
+  <raw name>_cal_<run time>_table.csv     a_i, b_i, point count, range, residual stats
   <raw name>_cal_<run time>_corrected.csv  every raw column unchanged, plus
                                            rod1_corrected_C ... rod5_corrected_C
   <raw name>_cal_<run time>_fits.png       rod_i_C vs tec_C, identity + fitted line
@@ -66,6 +69,23 @@ TABLE_COLUMNS = [
     "residual_std_C",
     "max_abs_residual_C",
 ]
+
+STATS_COLUMNS = [
+    "channel",
+    "n_points",            # rows used for this channel's statistics
+    "selection",
+    "mean_C",
+    "std_C",               # sample standard deviation (ddof=1): reading noise
+    "std_error_C",         # std / sqrt(n): uncertainty of the mean
+    "min_C",
+    "max_C",
+    "offset_from_tec_C",   # mean of (channel - tec_C), row by row
+    "offset_std_C",        # std of (channel - tec_C)
+]
+
+# Below this tec_C span the slope b is set by noise, not by the sensor, so
+# the fit is flagged and the rod - TEC offset is the better correction.
+MIN_SLOPE_SPAN_C = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +244,50 @@ def is_fitted(table_row):
 
 
 # ---------------------------------------------------------------------------
+# Per-thermistor statistics
+# ---------------------------------------------------------------------------
+def channel_stats(data, in_range, description):
+    """Mean, standard deviation, etc. of each thermistor over the range.
+
+    std_C is the scatter of the readings (ddof=1). If the true temperature
+    was steady over the range, this is the thermistor's noise. std_error_C
+    = std / sqrt(n) is the uncertainty of the mean. offset_from_tec_C is the
+    average of (rod - tec) taken row by row, i.e. how far that rod reads
+    above (+) or below (-) the reference; subtracting it is the simplest
+    correction when the range covers only one temperature.
+    """
+    tec = data[REFERENCE_COLUMN]
+    stats = []
+    for channel in [REFERENCE_COLUMN, *ROD_CHANNELS]:
+        values = data[channel]
+        rows = in_range & np.isfinite(values)
+        n_points = int(np.count_nonzero(rows))
+        row = {"channel": channel, "n_points": n_points, "selection": description}
+        if n_points >= 2:
+            std = float(np.std(values[rows], ddof=1))
+            row.update({
+                "mean_C": float(np.mean(values[rows])),
+                "std_C": std,
+                "std_error_C": std / math.sqrt(n_points),
+                "min_C": float(np.min(values[rows])),
+                "max_C": float(np.max(values[rows])),
+            })
+            if channel != REFERENCE_COLUMN:
+                difference = values[rows] - tec[rows]
+                row["offset_from_tec_C"] = float(np.mean(difference))
+                row["offset_std_C"] = float(np.std(difference, ddof=1))
+        stats.append(row)
+    return stats
+
+
+def channel_label(channel):
+    """'tec_C' -> 'TEC', 'rod3_C' -> 'Rod 3' (matches the live GUI)."""
+    if channel == REFERENCE_COLUMN:
+        return "TEC"
+    return channel.replace("_C", "").replace("rod", "Rod ")
+
+
+# ---------------------------------------------------------------------------
 # Output: file names
 # ---------------------------------------------------------------------------
 def new_output_path(stem, suffix):
@@ -240,19 +304,54 @@ def new_output_path(stem, suffix):
 # ---------------------------------------------------------------------------
 # Output: calibration table (printed and saved)
 # ---------------------------------------------------------------------------
+def print_stats(stats, description):
+    print(f"Thermistor statistics ({description}), all in °C")
+    header = (f"{'':<6} {'n':>5} {'mean':>8} {'std dev':>8} {'std err':>8}"
+              f" {'min':>7} {'max':>7}   {'rod - TEC (mean ± std)':<22}")
+    print(header)
+    print("-" * len(header))
+    for row in stats:
+        label = channel_label(row["channel"])
+        if "mean_C" not in row:
+            print(f"{label:<6} {row['n_points']:>5}  too few readings")
+            continue
+        offset = (f"{row['offset_from_tec_C']:+.3f} ± {row['offset_std_C']:.3f}"
+                  if "offset_from_tec_C" in row else "(reference)")
+        print(f"{label:<6} {row['n_points']:>5} {row['mean_C']:>8.3f} {row['std_C']:>8.4f}"
+              f" {row['std_error_C']:>8.4f} {row['min_C']:>7.2f} {row['max_C']:>7.2f}"
+              f"   {offset:<22}")
+
+
+def save_stats(stats, path):
+    with open(path, "x", newline="") as stats_file:
+        writer = csv.DictWriter(stats_file, fieldnames=STATS_COLUMNS)
+        writer.writeheader()
+        writer.writerows(stats)  # TEC has blank offset cells
+
+
 def print_table(table):
-    header = (f"{'channel':<8} {'a (C)':>9} {'b':>8} {'n':>6}  {'cal tec range (C)':<17}"
-              f" {'mean (C)':>9} {'std (C)':>8} {'max|r| (C)':>10}")
+    fitted_rows = [row for row in table if is_fitted(row)]
+    if fitted_rows:
+        tec_min = min(row["cal_tec_min_C"] for row in fitted_rows)
+        tec_max = max(row["cal_tec_max_C"] for row in fitted_rows)
+        print(f"Linear fit  tec = a + b * rod   (TEC {tec_min:.2f} to {tec_max:.2f} °C)")
+    header = (f"{'':<6} {'n':>5} {'a (°C)':>9} {'b':>8} {'resid std (°C)':>15}"
+              f" {'max |resid| (°C)':>17}")
     print(header)
     print("-" * len(header))
     for row in table:
+        label = channel_label(row["channel"])
         if not is_fitted(row):
-            print(f"{row['channel']:<8} {'not fitted':>9} {'':>8} {row['n_points']:>6}")
+            print(f"{label:<6} {row['n_points']:>5}  not fitted")
             continue
-        cal_range = f"{row['cal_tec_min_C']:.2f} to {row['cal_tec_max_C']:.2f}"
-        print(f"{row['channel']:<8} {row['a_C']:>9.4f} {row['b']:>8.5f} {row['n_points']:>6}"
-              f"  {cal_range:<17} {row['residual_mean_C']:>9.1e} {row['residual_std_C']:>8.4f}"
-              f" {row['max_abs_residual_C']:>10.4f}")
+        print(f"{label:<6} {row['n_points']:>5} {row['a_C']:>9.3f} {row['b']:>8.4f}"
+              f" {row['residual_std_C']:>15.4f} {row['max_abs_residual_C']:>17.4f}")
+
+    if fitted_rows and tec_max - tec_min < MIN_SLOPE_SPAN_C:
+        print(f"\nWARNING: TEC only spans {tec_max - tec_min:.2f} °C in this range, so a and b"
+              f" are set by noise\nand are not a usable calibration. Use the rod - TEC offsets"
+              f" above, or calibrate on\na run where the temperature changes by"
+              f" at least {MIN_SLOPE_SPAN_C:g} °C.")
 
 
 def save_table(table, path):
@@ -302,6 +401,49 @@ def make_axes_grid(title):
     axes[-1].set_visible(False)
     fig.suptitle(title)
     return fig, axes[:len(ROD_CHANNELS)]
+
+
+def plot_temperatures_vs_time(data, in_range, stats, description, path):
+    """All six thermistors against Arduino time on one set of axes.
+
+    The calibration range is shaded so you can see which readings went into
+    the statistics and fit. Each legend entry gives that channel's mean ±
+    standard deviation over the range. TEC is drawn thicker and in black,
+    as in the live GUI.
+    """
+    time = data["time_s"]
+    fig, ax = plt.subplots(figsize=(12, 6), constrained_layout=True)
+
+    # Shade each continuous stretch of in-range rows.
+    order = np.argsort(time)
+    shaded = in_range[order]
+    start = None
+    for k, inside in enumerate(np.append(shaded, False)):
+        if inside and start is None:
+            start = k
+        elif not inside and start is not None:
+            ax.axvspan(time[order][start], time[order][k - 1], color="0.9",
+                       label="calibration range" if start == np.argmax(shaded) else None)
+            start = None
+
+    stats_by_channel = {row["channel"]: row for row in stats}
+    for channel in [REFERENCE_COLUMN, *ROD_CHANNELS]:
+        row = stats_by_channel[channel]
+        label = channel_label(channel)
+        if "mean_C" in row:
+            label += f": {row['mean_C']:.3f} ± {row['std_C']:.3f} °C"
+        is_tec = channel == REFERENCE_COLUMN
+        ax.plot(time, data[channel], "-",
+                color="black" if is_tec else ROD_COLORS[channel],
+                linewidth=2.5 if is_tec else 1.3, label=label)
+
+    ax.set_title(f"Thermistor temperatures vs time (mean ± std over {description})")
+    ax.set_xlabel("Arduino time, time_s (s)")
+    ax.set_ylabel("Raw temperature (°C)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9, loc="best")
+    fig.savefig(path, dpi=150)
+    return fig
 
 
 def plot_fits(data, in_range, table, description, path):
@@ -411,8 +553,11 @@ def main():
     if not np.any(in_range):
         sys.exit("No usable rows in that range. Check the spans printed above.")
 
-    # ----- Fitting + residual calculation -----
+    # ----- Statistics, fitting + residual calculation -----
+    stats = channel_stats(data, in_range, description)
     table = calibrate(data, in_range, description)
+    print()
+    print_stats(stats, description)
     print()
     print_table(table)
     print()
@@ -420,17 +565,22 @@ def main():
     # ----- Output -----
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stem = f"{raw_path.stem}_cal_{datetime.now():%Y%m%d_%H%M%S}"
+    stats_path = new_output_path(stem, "_stats.csv")
     table_path = new_output_path(stem, "_table.csv")
     corrected_path = new_output_path(stem, "_corrected.csv")
+    time_plot_path = new_output_path(stem, "_vs_time.png")
     fits_path = new_output_path(stem, "_fits.png")
     residuals_path = new_output_path(stem, "_residuals.png")
 
+    save_stats(stats, stats_path)
     save_table(table, table_path)
     save_corrected_csv(raw_rows, data, table, corrected_path)
+    plot_temperatures_vs_time(data, in_range, stats, description, time_plot_path)
     plot_fits(data, in_range, table, description, fits_path)
     plot_residuals(data, in_range, table, description, residuals_path)
 
-    for path in (table_path, corrected_path, fits_path, residuals_path):
+    for path in (stats_path, table_path, corrected_path, time_plot_path, fits_path,
+                 residuals_path):
         print(f"Saved {path}")
 
     if not args.no_show:

@@ -23,7 +23,14 @@ channel before converting to a temperature, still parses "SET PWM ... DIR
 ..." commands, still drives the H-bridge, and still enforces its own
 independent over-temperature cutoff (and now a TEC sensor-fault cutoff) no
 matter what this script asks for. Only tec_C is used for PI feedback; the
-rod temperatures are plotted and logged. No calibration is applied.
+rod temperatures are plotted and logged.
+
+No thermistor calibration is applied, by design: every temperature shown,
+logged, or used for feedback is the Arduino's value as sent. A steady-
+temperature check (raw_mod7_20261028_112155.csv, analyzed with
+calibrate_thermistors_mod7.py) found the rods uniform enough to use
+uncorrected: rod - TEC offsets of +0.94, -0.43, +0.76, +0.31, +0.13 C for
+rods 1-5 at about 21.2 C.
 
 Two control modes are available from the GUI:
   - Manual: pick a PWM value and direction by hand, exactly like Module 4.
@@ -82,6 +89,17 @@ MIN_TEMPERATURE_AXIS_SPAN_C = 6.0
 
 PWM_MIN = 0
 PWM_MAX = 255
+
+# Window layout. The plots take all the space left of a fixed-width
+# sidebar; PLOT_HEIGHT_STRETCH is the starting height ratio of the
+# temperature, PWM and error plots (drag the borders to change it).
+SIDEBAR_WIDTH_PX = 330
+PLOT_HEIGHT_STRETCH = (3, 1, 2)
+TEMPERATURE_READOUT_STYLE = "font-size: 13pt;"
+READOUT_STYLE = "font-size: 11pt;"
+SMALL_TEXT_STYLE = "font-size: 10pt; color: gray;"
+AXIS_FONT_PT = 12
+AXIS_TEXT_COLOR = (40, 40, 40)
 
 # Legends sit in each plot's top-left corner (a positive offset anchors to
 # the top-left) on an opaque light-gray box with a dark border and dark text.
@@ -433,22 +451,46 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.accepted_line_count = 0
         self.rejected_line_count = 0
 
+        # Layout: the three plots fill everything except a narrow sidebar on
+        # the right that holds the readouts and controls. The plots sit in a
+        # splitter, so the borders between them can be dragged.
         central_widget = QtWidgets.QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QtWidgets.QVBoxLayout(central_widget)
+        main_layout = QtWidgets.QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(4, 4, 4, 4)
 
-        temperatures_row = QtWidgets.QHBoxLayout()
-        temperatures_row.addWidget(self._build_temperature_readings_box(), stretch=1)
-        temperatures_row.addWidget(self._build_serial_lines_box())
-        main_layout.addLayout(temperatures_row)
-        main_layout.addWidget(self._build_live_readings_box())
-        main_layout.addWidget(self._build_pi_readings_box())
-        main_layout.addWidget(self._build_mode_box())
-        main_layout.addWidget(self._build_manual_control_box())
-        main_layout.addWidget(self._build_pi_control_box())
-        main_layout.addWidget(self._build_temperature_plot())
-        main_layout.addWidget(self._build_pwm_plot())
-        main_layout.addWidget(self._build_error_plot())
+        plot_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        plot_splitter.addWidget(self._build_temperature_plot())
+        plot_splitter.addWidget(self._build_pwm_plot())
+        plot_splitter.addWidget(self._build_error_plot())
+        for index, stretch in enumerate(PLOT_HEIGHT_STRETCH):
+            plot_splitter.setStretchFactor(index, stretch)
+        # Larger, darker axis numbers and titles than pyqtgraph's default.
+        # The font is kept on self: pyqtgraph holds on to it without its own
+        # reference, and the GUI crashes if Python frees it.
+        self.axis_font = QtGui.QFont()
+        self.axis_font.setPointSize(AXIS_FONT_PT)
+        for plot in (self.temperature_plot, self.pwm_plot, self.error_plot):
+            for side in ("left", "bottom", "right"):
+                axis = plot.getPlotItem().getAxis(side)
+                axis.setTickFont(self.axis_font)
+                axis.setTextPen(pg.mkPen(AXIS_TEXT_COLOR))
+                axis.label.setFont(self.axis_font)
+        main_layout.addWidget(plot_splitter, stretch=1)
+
+        sidebar = QtWidgets.QWidget()
+        sidebar.setFixedWidth(SIDEBAR_WIDTH_PX)
+        sidebar_layout = QtWidgets.QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(self._build_temperature_readings_box())
+        sidebar_layout.addWidget(self._build_live_readings_box())
+        sidebar_layout.addWidget(self._build_pi_readings_box())
+        sidebar_layout.addWidget(self._build_mode_box())
+        sidebar_layout.addWidget(self._build_manual_control_box())
+        sidebar_layout.addWidget(self._build_pi_control_box())
+        sidebar_layout.addStretch(1)
+        sidebar_layout.addWidget(self._build_serial_lines_box())
+        main_layout.addWidget(sidebar)
 
         # Controls are disabled until the serial port actually opens, so we
         # can't try to write to a port that isn't ready yet.
@@ -488,33 +530,38 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
     # -----------------------------------------------------------------
     def _build_temperature_readings_box(self):
         """Build one live readout per thermistor, colored like its trace on
-        the temperature plot. self.temperature_labels["rod2_C"] is rod 2's
-        label, so on_measurement() can update them all in one loop.
+        the temperature plot, in a two-column grid. self.temperature_labels
+        ["rod2_C"] is rod 2's label, so on_measurement() can update them all
+        in one loop.
         """
         box = QtWidgets.QGroupBox("Temperatures (C)")
-        layout = QtWidgets.QHBoxLayout(box)
+        layout = QtWidgets.QGridLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setVerticalSpacing(2)
 
         self.temperature_labels = {}
-        for field_name, label_text, color in TEMPERATURE_TRACES:
+        for index, (field_name, label_text, color) in enumerate(TEMPERATURE_TRACES):
             label = QtWidgets.QLabel(f"{label_text}: --")
             weight = "bold" if field_name == "tec_C" else "normal"
             label.setStyleSheet(
-                f"font-size: 14pt; font-weight: {weight}; color: rgb{color};"
+                f"{TEMPERATURE_READOUT_STYLE} font-weight: {weight}; color: rgb{color};"
             )
             self.temperature_labels[field_name] = label
-            layout.addWidget(label)
+            layout.addWidget(label, index // 2, index % 2)
 
         return box
 
     def _build_serial_lines_box(self):
-        """Build the accepted/rejected serial line counters. "Rejected"
-        counts every non-empty complete line that wasn't a valid DATA record,
-        including the Arduino's one-time header line, so it normally reads 1
-        right after connecting. The most recent rejected line is shown so you
-        can see why.
+        """Build the accepted/rejected serial line counters, in small gray
+        text at the bottom of the sidebar. "Rejected" counts every non-empty
+        complete line that wasn't a valid DATA record, including the
+        Arduino's one-time header line, so it normally reads 1 right after
+        connecting. The most recent rejected line is shown so you can see why.
         """
-        box = QtWidgets.QGroupBox("Serial Lines")
+        box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(0)
 
         self.accepted_count_label = QtWidgets.QLabel("Accepted: 0")
         self.rejected_count_label = QtWidgets.QLabel("Rejected: 0")
@@ -524,24 +571,36 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         layout.addLayout(counts_row)
 
         self.last_rejected_label = QtWidgets.QLabel("Last rejected: --")
-        self.last_rejected_label.setStyleSheet("color: gray;")
-        self.last_rejected_label.setMaximumWidth(360)
-        layout.addWidget(self.last_rejected_label)
-
         self.raw_file_label = QtWidgets.QLabel("Raw CSV: --")
-        self.raw_file_label.setStyleSheet("color: gray;")
+        for label in (self.accepted_count_label, self.rejected_count_label,
+                      self.last_rejected_label, self.raw_file_label):
+            label.setStyleSheet(SMALL_TEXT_STYLE)
+        # Ignored width: a long rejected line is cut off instead of
+        # widening the sidebar.
+        self.last_rejected_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred
+        )
+        layout.addWidget(self.last_rejected_label)
         layout.addWidget(self.raw_file_label)
 
         return box
 
-    def _build_live_readings_box(self):
-        """Build the row of read-only labels showing the latest values
-        reported back by the Arduino (not just what we asked it to do), plus
-        the setpoint/error this script is currently working from.
-        """
-        box = QtWidgets.QGroupBox("Live Readings")
-        layout = QtWidgets.QHBoxLayout(box)
+    def _build_readout_grid(self, title, labels):
+        """A group box showing the given labels in a two-column grid."""
+        box = QtWidgets.QGroupBox(title)
+        layout = QtWidgets.QGridLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setVerticalSpacing(2)
+        for index, label in enumerate(labels):
+            label.setStyleSheet(READOUT_STYLE)
+            layout.addWidget(label, index // 2, index % 2)
+        return box
 
+    def _build_live_readings_box(self):
+        """Build the read-only labels showing the latest values reported
+        back by the Arduino (not just what we asked it to do), plus the
+        setpoint/error this script is currently working from.
+        """
         # QLabel is just a piece of text on screen. We keep a reference to
         # each one (self.pwm_label, etc.) so we can update its text
         # later whenever a new measurement arrives.
@@ -552,50 +611,36 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.safety_label = QtWidgets.QLabel("Safety: --")
         self.time_label = QtWidgets.QLabel("Time: -- s")
 
-        labels = (
+        return self._build_readout_grid("Live Readings", (
             self.pwm_label,
             self.direction_label,
             self.setpoint_label,
             self.error_label,
             self.safety_label,
             self.time_label,
-        )
-        for label in labels:
-            label.setStyleSheet("font-size: 14pt;")
-            layout.addWidget(label)
-
-        return box
+        ))
 
     def _build_pi_readings_box(self):
-        """Build the row of labels showing the latest PI step: the error,
-        both terms, the integral, the requested (unclamped) command, the
-        applied (clamped, signed) command, and whether anti-windup held q.
+        """Build the labels showing the latest PI step: both terms, the
+        integral, the requested (unclamped) command, the applied (clamped,
+        signed) command, and whether anti-windup held q. The error e is the
+        Error in Live Readings.
         """
-        box = QtWidgets.QGroupBox("PI Terms (latest step)")
-        layout = QtWidgets.QHBoxLayout(box)
-
-        self.pi_error_label = QtWidgets.QLabel("e: -- C")
         self.p_term_label = QtWidgets.QLabel("u_P: --")
         self.i_term_label = QtWidgets.QLabel("u_I: --")
         self.integral_label = QtWidgets.QLabel("q: 0.00 C*s")
+        self.integrator_label = QtWidgets.QLabel("Integrator: --")
         self.u_requested_label = QtWidgets.QLabel("Requested u: --")
         self.u_applied_label = QtWidgets.QLabel("Applied u: --")
-        self.integrator_label = QtWidgets.QLabel("Integrator: --")
 
-        labels = (
-            self.pi_error_label,
+        return self._build_readout_grid("PI Terms (latest step)", (
             self.p_term_label,
             self.i_term_label,
             self.integral_label,
+            self.integrator_label,
             self.u_requested_label,
             self.u_applied_label,
-            self.integrator_label,
-        )
-        for label in labels:
-            label.setStyleSheet("font-size: 12pt;")
-            layout.addWidget(label)
-
-        return box
+        ))
 
     def _build_mode_box(self):
         """Build the Manual/PI Control switch. Only one mode drives the
@@ -604,6 +649,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """
         box = QtWidgets.QGroupBox("Control Mode")
         layout = QtWidgets.QHBoxLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
 
         self.manual_mode_radio = QtWidgets.QRadioButton("Manual")
         self.pi_mode_radio = QtWidgets.QRadioButton("PI Control")
@@ -622,25 +668,27 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         box. Only takes effect while Control Mode is Manual.
         """
         self.manual_control_box = QtWidgets.QGroupBox("Manual Control")
-        layout = QtWidgets.QHBoxLayout(self.manual_control_box)
+        layout = QtWidgets.QGridLayout(self.manual_control_box)
+        layout.setContentsMargins(6, 4, 6, 4)
 
         # --- Heat/Cool switch -------------------------------------------------
         # Two radio buttons in the same QButtonGroup act like a switch: only
         # one of them can be selected ("checked") at a time.
-        direction_group_box = QtWidgets.QGroupBox("Direction")
-        direction_layout = QtWidgets.QHBoxLayout(direction_group_box)
         self.heat_radio = QtWidgets.QRadioButton("Heat")
         self.cool_radio = QtWidgets.QRadioButton("Cool")
         self.cool_radio.setChecked(True)  # matches the Arduino sketch's default state
         self.direction_button_group = QtWidgets.QButtonGroup(self)
         self.direction_button_group.addButton(self.heat_radio)
         self.direction_button_group.addButton(self.cool_radio)
+        direction_layout = QtWidgets.QHBoxLayout()
         direction_layout.addWidget(self.heat_radio)
         direction_layout.addWidget(self.cool_radio)
+        direction_layout.addStretch(1)
         # toggled() fires for both the button that got checked and the one
         # that got unchecked, so we only react when a button becomes checked.
         self.heat_radio.toggled.connect(self.on_direction_changed)
-        layout.addWidget(direction_group_box)
+        layout.addWidget(QtWidgets.QLabel("Direction:"), 0, 0)
+        layout.addLayout(direction_layout, 0, 1, 1, 2)
 
         # --- PWM slider ---------------------------------------------------
         self.pwm_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -660,11 +708,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # not on every keystroke, so we're not fighting the user while they type.
         self.pwm_edit.editingFinished.connect(self.on_pwm_edit_finished)
 
-        pwm_layout = QtWidgets.QHBoxLayout()
-        pwm_layout.addWidget(QtWidgets.QLabel("PWM (0-255):"))
-        pwm_layout.addWidget(self.pwm_slider)
-        pwm_layout.addWidget(self.pwm_edit)
-        layout.addLayout(pwm_layout)
+        layout.addWidget(QtWidgets.QLabel("PWM:"), 1, 0)
+        layout.addWidget(self.pwm_slider, 1, 1)
+        layout.addWidget(self.pwm_edit, 1, 2)
 
         return self.manual_control_box
 
@@ -674,9 +720,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         drives the Arduino while Control Mode is PI Control.
         """
         self.pi_control_box = QtWidgets.QGroupBox("PI Control")
-        box_layout = QtWidgets.QVBoxLayout(self.pi_control_box)
-        layout = QtWidgets.QHBoxLayout()
-        box_layout.addLayout(layout)
+        layout = QtWidgets.QGridLayout(self.pi_control_box)
+        layout.setContentsMargins(6, 4, 6, 4)
 
         self.setpoint_spinbox = QtWidgets.QDoubleSpinBox()
         self.setpoint_spinbox.setRange(SETPOINT_MIN_C, SETPOINT_MAX_C)
@@ -691,19 +736,15 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.kp_spinbox.setSingleStep(0.1)
         self.kp_spinbox.setValue(DEFAULT_KP)
 
-        layout.addWidget(QtWidgets.QLabel("Setpoint (Tset):"))
-        layout.addWidget(self.setpoint_spinbox)
-        layout.addWidget(QtWidgets.QLabel("Kp:"))
-        layout.addWidget(self.kp_spinbox)
-        layout.addWidget(QtWidgets.QLabel("u = Kp*e + Ki*q; sign(u) -> direction, |u| -> PWM"))
+        layout.addWidget(QtWidgets.QLabel("Setpoint:"), 0, 0)
+        layout.addWidget(self.setpoint_spinbox, 0, 1, 1, 2)
+        layout.addWidget(QtWidgets.QLabel("Kp:"), 1, 0)
+        layout.addWidget(self.kp_spinbox, 1, 1, 1, 2)
 
         # --- Ki slider + text box ------------------------------------------
         # QSlider only holds integers, so it stores Ki * KI_SLIDER_SCALE.
         # The two widgets are kept in sync the same way as the PWM slider and
         # text box, with signals blocked so neither re-triggers the other.
-        ki_layout = QtWidgets.QHBoxLayout()
-        box_layout.addLayout(ki_layout)
-
         self.ki_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.ki_slider.setMinimum(round(KI_MIN * KI_SLIDER_SCALE))
         self.ki_slider.setMaximum(round(KI_MAX * KI_SLIDER_SCALE))
@@ -717,20 +758,28 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.ki_spinbox.setValue(DEFAULT_KI)
         self.ki_spinbox.valueChanged.connect(self.on_ki_spinbox_changed)
 
-        self.reset_integral_button = QtWidgets.QPushButton("Reset integral (q = 0)")
+        layout.addWidget(QtWidgets.QLabel(f"Ki ({KI_MIN:g}-{KI_MAX:g}):"), 2, 0)
+        layout.addWidget(self.ki_slider, 2, 1)
+        layout.addWidget(self.ki_spinbox, 2, 2)
+
+        self.reset_integral_button = QtWidgets.QPushButton("Reset q = 0")
         self.reset_integral_button.clicked.connect(self.reset_integral)
 
         # Checkable: while pressed, Ki is forced to 0 and its slider/text box
         # are grayed out, so the controller is P-only.
-        self.p_only_button = QtWidgets.QPushButton("P Control (Ki = 0)")
+        self.p_only_button = QtWidgets.QPushButton("P only (Ki = 0)")
         self.p_only_button.setCheckable(True)
         self.p_only_button.toggled.connect(self.on_p_only_toggled)
 
-        ki_layout.addWidget(QtWidgets.QLabel(f"Ki ({KI_MIN:g}-{KI_MAX:g}):"))
-        ki_layout.addWidget(self.ki_slider)
-        ki_layout.addWidget(self.ki_spinbox)
-        ki_layout.addWidget(self.p_only_button)
-        ki_layout.addWidget(self.reset_integral_button)
+        buttons_row = QtWidgets.QHBoxLayout()
+        buttons_row.addWidget(self.p_only_button)
+        buttons_row.addWidget(self.reset_integral_button)
+        layout.addLayout(buttons_row, 3, 0, 1, 3)
+
+        law_label = QtWidgets.QLabel("u = Kp*e + Ki*q; sign(u) -> direction, |u| -> PWM")
+        law_label.setStyleSheet(SMALL_TEXT_STYLE)
+        law_label.setWordWrap(True)
+        layout.addWidget(law_label, 4, 0, 1, 3)
 
         return self.pi_control_box
 
@@ -1076,7 +1125,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # ----- 1. Raw CSV: the record exactly as the Arduino sent it -----
         # record["raw"] maps each of the 11 column names to the original
         # text, so the file holds exactly what came over the serial line:
-        # no rounding, no unit changes, no calibration.
+        # no rounding, no unit changes, no calibration (none is needed;
+        # see the module docstring).
         self.raw_csv_writer.writerow(record["raw"])
         # flush() hands the row to the operating system right away instead
         # of letting Python hold it in memory, so if the GUI crashes or is
@@ -1132,16 +1182,14 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
         if tec_valid:
             self.error_label.setText(f"Error: {error:+.2f} C")
-            self.pi_error_label.setText(f"e: {error:+.2f} C")
         else:
             self.error_label.setText("Error: -- C")
-            self.pi_error_label.setText("e: -- C")
         self.pwm_label.setText(f"PWM: {pwm}")
         self.direction_label.setText(f"Direction: {direction}")
         self.setpoint_label.setText(f"Setpoint: {setpoint:.2f} C")
         self.safety_label.setText(f"Safety: {safety}")
         self.safety_label.setStyleSheet(
-            "font-size: 14pt;" + ("" if safety == "OK" else " color: red; font-weight: bold;")
+            READOUT_STYLE + ("" if safety == "OK" else " color: red; font-weight: bold;")
         )
         self.time_label.setText(f"Time: {time_s:.2f} s")
 
@@ -1285,8 +1333,8 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     window = TemperaturePlotWindow(port, BAUD_RATE)
-    window.resize(1050, 1000)
-    window.show()
+    window.resize(1400, 900)
+    window.showMaximized()
     sys.exit(app.exec())
 
 
