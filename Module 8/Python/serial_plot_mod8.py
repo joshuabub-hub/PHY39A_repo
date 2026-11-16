@@ -49,13 +49,11 @@ With Ki = 0 this is the Module 5 P-only controller. Start gains small (see
 DEFAULT_KP / DEFAULT_KI below) and increase them gradually.
 
 Module 8 additions (Angstrom drive of the rod base):
-  - Four control modes: Manual, Open loop, P-only, PI. Open loop sends
-    u = uff(Tset(t)); P-only and PI send u = uff + Kp*e + Ki*q (Ki = 0 for
-    P-only; uff can be switched off with the checkbox).
-  - uff(Tset) inverts the measured steady-state susceptibility curves in
-    data/pwm_steady_state.csv: u = (Tset - Troom)/m_heat when heating and
-    (Tset - Troom)/m_cool when cooling, where Troom is the measured room
-    temperature entered in the GUI.
+  - Manual, feedforward, P, PI, and two raw-PWM diagnostic modes.
+  - Feedforward linearly interpolates the measured steady-state curve shifted
+    to the entered room temperature; requests outside that range are rejected.
+  - P and PI cooling commands use the measured heating/cooling slope ratio;
+    diagnostic and feedforward-only commands do not receive compensation.
   - A sinusoidal setpoint Tset(t) = Ta + Tb * sin(2 pi t / tau), where Ta is
     the mean setpoint, Tb the oscillation amplitude and tau the period,
     starts from the Start button; tau cannot be set below 100 s.
@@ -70,6 +68,7 @@ import math
 from pathlib import Path
 import sys
 import threading
+import time
 
 import numpy as np
 import serial
@@ -163,7 +162,7 @@ WAVE_PEAK_LIMIT_C = 58.0
 # signed PWM, heating and cooling fitted separately.
 STEADY_STATE_CSV = Path(__file__).resolve().parents[1] / "data" / "pwm_steady_state.csv"
 
-CONTROL_MODES = ("OPEN", "P", "PI")  # modes that run compute_pi_control()
+CONTROL_MODES = ("OPEN", "P", "PI", "RAW_AC", "RAW_HEAT")
 FEEDBACK_CHOICES = (("TEC thermistor (A0)", "tec_C"), ("Rod 1 / T1 (A1)", "rod1_C"))
 
 # Every run writes two NEW files in Module 8/data, named with the time the
@@ -232,6 +231,16 @@ PI_LOG_CSV_FIELDNAMES = [
     "u_ff",
     "feedback_C",
     "feedback_sensor",
+    "operating_state",
+    "run_segment",
+    "wave_mean_C",
+    "wave_amplitude_C",
+    "period_s",
+    "raw_ua_pwm",
+    "raw_ub_pwm",
+    "cooling_ratio",
+    "observed_signed_pwm",
+    *ROD_FIELDNAMES,
 ]
 
 # The Arduino reports direction as an integer (1 = heating, 0 = cooling).
@@ -260,6 +269,41 @@ def feedforward_pwm(t_set, room_c, m_heat, m_cool):
     """Signed PWM (+ heat, - cool) whose steady-state temperature is t_set."""
     delta = t_set - room_c
     return delta / m_heat if delta >= 0 else delta / m_cool
+
+
+def load_susceptibility_curve(path):
+    """Load the measured signed-PWM curve, relative to its zero-PWM baseline."""
+    with open(path, newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    points = {}
+    for row in rows:
+        pwm = int(row["pwm"])
+        temperature = float(row["steady_state_temp_C"])
+        if not math.isfinite(temperature) or (pwm in points and points[pwm] != temperature):
+            raise ValueError("Invalid or conflicting susceptibility measurements")
+        points[pwm] = temperature
+    if 0 not in points or not any(p < 0 for p in points) or not any(p > 0 for p in points):
+        raise ValueError("Susceptibility curve requires zero, cooling and heating measurements")
+    ordered = sorted((temperature - points[0], pwm) for pwm, temperature in points.items())
+    if any(ordered[i][0] >= ordered[i + 1][0] or ordered[i][1] >= ordered[i + 1][1]
+           for i in range(len(ordered) - 1)):
+        raise ValueError("Susceptibility curve must be strictly increasing")
+    return ordered
+
+
+def interpolate_feedforward(t_set, room_c, curve):
+    """Invert the measured curve after shifting its zero-PWM temperature to room."""
+    delta = t_set - room_c
+    if not curve[0][0] <= delta <= curve[-1][0]:
+        raise ValueError("Setpoint is outside the measured feedforward range")
+    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
+        if x0 <= delta <= x1:
+            return y0 + (delta - x0) * (y1 - y0) / (x1 - x0)
+    raise ValueError("Setpoint is outside the measured feedforward range")
+
+
+def compensated_pwm(command, ratio):
+    return command * ratio if command < 0 else command
 
 
 def waveform_setpoint(elapsed_s, ta_c, tb_c, period_s):
@@ -421,6 +465,7 @@ class SerialReader(QtCore.QThread):
                     while b"\n" in buffer:
                         raw_line, buffer = buffer.split(b"\n", 1)
                         self._handle_line(raw_line)
+                connection.write(b"SET PWM 0 DIR COOL\n")
         except serial.SerialException as error:
             self.error.emit(str(error))
         finally:
@@ -485,8 +530,12 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.current_direction = "COOL"
         self.control_mode = "MANUAL"  # MANUAL, OPEN, P or PI
         self.m_heat, self.m_cool, self.baseline_c = load_susceptibility(STEADY_STATE_CSV)
+        self.susceptibility_curve = load_susceptibility_curve(STEADY_STATE_CSV)
+        self.cooling_ratio = self.m_heat / self.m_cool
         self.waveform_start_s = None
         self.latest_time_s = None
+        self.last_record_monotonic = None
+        self.missing_reported = False
 
         # PI state. integral is q (degree C * s). previous_pi_time_s is the
         # Arduino time of the last measurement the PI step used, so dt comes
@@ -569,6 +618,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.redraw_timer = QtCore.QTimer(self)
         self.redraw_timer.timeout.connect(self.redraw_plots)
         self.redraw_timer.start(PLOT_UPDATE_INTERVAL_MS)
+        self.watchdog_timer = QtCore.QTimer(self)
+        self.watchdog_timer.timeout.connect(self.check_missing_records)
+        self.watchdog_timer.start(1000)
 
         self.manual_send_timer = QtCore.QTimer(self)
         self.manual_send_timer.setSingleShot(True)
@@ -712,7 +764,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.mode_button_group = QtWidgets.QButtonGroup(self)
         self.mode_radios = {}
         for index, (key, text) in enumerate(
-            (("MANUAL", "Manual"), ("OPEN", "Open loop (uff)"), ("P", "P-only"), ("PI", "PI"))
+            (("MANUAL", "Manual"), ("OPEN", "Feedforward"), ("P", "P-only"), ("PI", "PI"),
+             ("RAW_AC", "Oscillate PWM ±"), ("RAW_HEAT", "Raw PWM heating"))
         ):
             radio = QtWidgets.QRadioButton(text)
             self.mode_button_group.addButton(radio)
@@ -728,7 +781,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """Build the sinusoid settings, room temperature, feedback sensor and
         the feedforward summary computed from the susceptibility curves.
         """
-        box = QtWidgets.QGroupBox("Sinusoidal setpoint")
+        box = QtWidgets.QGroupBox("Sinusoidal drive")
         layout = QtWidgets.QFormLayout(box)
 
         def spin(value, low, high, suffix):
@@ -745,6 +798,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.period_spinbox = spin(WAVE_PERIOD_S, MIN_PERIOD_S, MAX_PERIOD_S, " s")
         self.period_spinbox.setSingleStep(10)
         self.room_spinbox = spin(round(self.baseline_c, 1), 0.0, 40.0, " C")
+        self.raw_ua_spinbox = spin(0.0, 0.0, 255.0, " PWM")
+        self.raw_ub_spinbox = spin(0.0, 0.0, 255.0, " PWM")
         self.feedback_combo = QtWidgets.QComboBox()
         for text, field in FEEDBACK_CHOICES:
             self.feedback_combo.addItem(text, field)
@@ -760,30 +815,47 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         layout.addRow("Tb (amplitude):", self.tb_spinbox)
         layout.addRow("Period tau:", self.period_spinbox)
         layout.addRow("Room temperature:", self.room_spinbox)
+        layout.addRow("Raw PWM mean ua:", self.raw_ua_spinbox)
+        layout.addRow("PWM oscillation amplitude ub:", self.raw_ub_spinbox)
         layout.addRow("Feedback sensor:", self.feedback_combo)
         layout.addRow(self.ff_checkbox)
         layout.addRow(self.waveform_button)
         layout.addRow(self.ff_info_label)
-        for widget in (self.ta_spinbox, self.tb_spinbox, self.room_spinbox):
+        for widget in (self.ta_spinbox, self.tb_spinbox, self.room_spinbox,
+                       self.raw_ua_spinbox, self.raw_ub_spinbox, self.period_spinbox):
             widget.valueChanged.connect(self.update_feedforward_label)
         self.update_feedforward_label()
 
         return box
 
     def update_feedforward_label(self):
+        if self.control_mode in ("RAW_AC", "RAW_HEAT"):
+            ua = self.raw_ua_spinbox.value() if self.control_mode == "RAW_HEAT" else 0.0
+            ub = self.raw_ub_spinbox.value()
+            self.waveform_button.setEnabled(True)
+            self.ff_info_label.setText(
+                f"Raw PWM: u(t) = {ua:g} + {ub:g} sin(2πt/{self.period_spinbox.value():g} s); "
+                f"requested range {ua - ub:g} to {ua + ub:g} PWM. "
+                "No feedforward or cooling compensation; output is limited to ±255."
+            )
+            return
         room = self.room_spinbox.value()
         ratio = self.m_heat / self.m_cool
         peak = self.ta_spinbox.value() + self.tb_spinbox.value()
         trough = self.ta_spinbox.value() - self.tb_spinbox.value()
-        u_peak = feedforward_pwm(peak, room, self.m_heat, self.m_cool)
-        u_trough = feedforward_pwm(trough, room, self.m_heat, self.m_cool)
+        try:
+            u_peak = interpolate_feedforward(peak, room, self.susceptibility_curve)
+            u_trough = interpolate_feedforward(trough, room, self.susceptibility_curve)
+            ff_text = f"uff(peak) = {u_peak:+.1f} PWM, uff(trough) = {u_trough:+.1f} PWM"
+        except ValueError:
+            ff_text = "Waveform extends outside the measured feedforward range."
         too_hot = peak > WAVE_PEAK_LIMIT_C
         self.waveform_button.setEnabled(not too_hot or self.waveform_button.isChecked())
         warning = f"\nPeak {peak:g} C exceeds the {WAVE_PEAK_LIMIT_C:g} C limit." if too_hot else ""
         self.ff_info_label.setText(
             f"Tset ranges {trough:g} to {peak:g} C. m_heat = {self.m_heat:.3f} C/PWM, "
             f"m_cool = {self.m_cool:.3f} C/PWM, ratio r = {ratio:.2f}.\n"
-            f"uff(peak) = {u_peak:+.0f} PWM, uff(trough) = {u_trough:+.0f} PWM "
+            f"{ff_text} "
             f"(+ = HEAT, - = COOL).{warning}"
         )
 
@@ -805,13 +877,25 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(bool)
     def on_waveform_toggled(self, running):
+        if running and self.control_mode in ("RAW_AC", "RAW_HEAT"):
+            ua = self.raw_ua_spinbox.value()
+            ub = self.raw_ub_spinbox.value()
+            if ub <= 0 or (self.control_mode == "RAW_HEAT" and not ua > ub):
+                QtWidgets.QMessageBox.warning(self, "Invalid raw PWM", "Use ub > 0; heating-only also requires ua > ub.")
+                self.waveform_button.blockSignals(True)
+                self.waveform_button.setChecked(False)
+                self.waveform_button.blockSignals(False)
+                return
         self.waveform_button.setText("Stop sinusoid" if running else "Start sinusoid")
         self.waveform_start_s = None  # restarts at the next record's time
         self.previous_pi_time_s = None
         self.reset_integral()
         # Period and amplitude are fixed while running so the drive stays constant.
-        for widget in (self.ta_spinbox, self.tb_spinbox, self.period_spinbox):
+        for widget in (self.ta_spinbox, self.tb_spinbox, self.period_spinbox, self.raw_ua_spinbox, self.raw_ub_spinbox):
             widget.setEnabled(not running)
+        if not running and self.control_mode in ("RAW_AC", "RAW_HEAT"):
+            self.current_pwm = 0
+            self.send_current_settings()
         print(f"Sinusoid {'started' if running else 'stopped'}: "
               f"Ta={self.ta_spinbox.value():g} C, Tb={self.tb_spinbox.value():g} C, "
               f"P={self.period_spinbox.value():g} s")
@@ -970,7 +1054,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         self.pwm_plot.setLabel("left", "PWM", units="", **LABEL_STYLE)
         self.pwm_plot.setLabel("bottom", "Time", units="s", **LABEL_STYLE)
         self.pwm_plot.showGrid(x=True, y=True)
-        self.pwm_plot.setYRange(PWM_MIN, PWM_MAX, padding=0)
+        self.pwm_plot.setYRange(-PWM_MAX, PWM_MAX, padding=0)
         # The legend must exist before the curves so plot(name=...) adds them.
         self.pwm_plot.addLegend(**LEGEND_OPTIONS)
         self.pwm_heat_curve = self.pwm_plot.plot(
@@ -1163,7 +1247,13 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str)
     def on_mode_changed(self, mode):
+        if self.waveform_button.isChecked():
+            self.waveform_button.setChecked(False)
+        self.current_pwm = 0
+        if self.reader.is_connected:
+            self.send_current_settings()
         self.control_mode = mode
+        self.update_feedforward_label()
         self.mode_label.setText(f"Mode: {mode}")
         # Manual widgets are disabled outside Manual mode so the two controllers
         # can never fight over the same serial link.
@@ -1173,10 +1263,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         if mode != "MANUAL":
             self.reset_integral()
         else:
-            # Back to Manual: resume from the slider/radio buttons instead of
-            # leaving the Arduino on the last computed PWM.
-            self.current_pwm = self.pwm_slider.value()
-            self.current_direction = "HEAT" if self.heat_radio.isChecked() else "COOL"
+            self.current_pwm = 0
+            self.current_direction = "COOL"
+            self._sync_manual_widgets(0, "COOL")
             self.send_current_settings()
 
     @QtCore.Slot()
@@ -1185,7 +1274,20 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # manual controls (if that's the active mode) and tell the Arduino
         # our starting PWM/direction.
         self.manual_control_box.setEnabled(self.control_mode == "MANUAL")
+        self.last_record_monotonic = time.monotonic()
         self.send_current_settings()
+
+    @QtCore.Slot()
+    def check_missing_records(self):
+        if (self.last_record_monotonic is not None
+                and time.monotonic() - self.last_record_monotonic > 3.0
+                and not self.missing_reported):
+            self.missing_reported = True
+            self.current_pwm = 0
+            self.send_current_settings()
+            self.last_rejected_label.setText("Missing records for over 3 s; PWM off requested.")
+            self.last_rejected_label.setStyleSheet("color: red;")
+            self.previous_pi_time_s = None
 
     # -----------------------------------------------------------------
     # PI control
@@ -1219,7 +1321,43 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         """
         mode = self.control_mode
         setpoint = self.current_setpoint(time_s)
-        u_ff = self.feedforward_for(setpoint) if (mode == "OPEN" or self.ff_checkbox.isChecked()) else 0.0
+        if mode in ("RAW_AC", "RAW_HEAT"):
+            if not self.waveform_button.isChecked():
+                u_requested = 0.0
+            else:
+                if self.waveform_start_s is None:
+                    self.waveform_start_s = time_s
+                phase = 2 * math.pi * (time_s - self.waveform_start_s) / self.period_spinbox.value()
+                u_requested = self.raw_ub_spinbox.value() * math.sin(phase)
+                if mode == "RAW_HEAT":
+                    u_requested += self.raw_ua_spinbox.value()
+            setpoint = float("nan")
+            u_ff = 0.0
+            kp = ki = dt = p_term = i_term = 0.0
+            error = float("nan")
+            integral_held = True
+            u_physical = u_requested
+        else:
+            return self.compute_corrected_control(time_s, temperature_c, mode, setpoint)
+
+        direction = "HEAT" if u_physical >= 0 else "COOL"
+        pwm_magnitude = clamp_pwm(int(round(abs(u_physical))))
+        u_applied = pwm_magnitude if direction == "HEAT" else -pwm_magnitude
+        self.current_pwm = pwm_magnitude
+        self.current_direction = direction
+        self.send_current_settings()
+        return {
+            "setpoint": setpoint, "error": error, "u_ff": u_ff, "kp": kp, "ki": ki,
+            "dt": dt, "p_term": p_term, "i_term": i_term, "integral": self.integral,
+            "integral_held": integral_held, "u_requested": u_requested, "u_applied": u_applied,
+        }
+
+    def compute_corrected_control(self, time_s, temperature_c, mode, setpoint):
+        needs_ff = mode == "OPEN" or self.ff_checkbox.isChecked()
+        physical_ff = interpolate_feedforward(setpoint, self.room_spinbox.value(), self.susceptibility_curve) if needs_ff else 0.0
+        # Express cooling feedforward in heating-equivalent units before
+        # compensating the combined control command once.
+        u_ff = physical_ff / self.cooling_ratio if physical_ff < 0 and mode != "OPEN" else physical_ff
         kp = self.kp_spinbox.value() if mode in ("P", "PI") else 0.0
         ki = self.ki_spinbox.value() if mode == "PI" else 0.0
         error = setpoint - temperature_c
@@ -1230,8 +1368,8 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             dt = max(0.0, time_s - self.previous_pi_time_s)
         self.previous_pi_time_s = time_s
 
-        u_before = u_ff + kp * error + ki * self.integral
-        integral_held = mode == "PI" and abs(u_before) > PWM_MAX and error * u_before > 0
+        candidate = u_ff + kp * error + ki * (self.integral + error * dt)
+        integral_held = mode == "PI" and abs(compensated_pwm(candidate, self.cooling_ratio)) > PWM_MAX and error * candidate > 0
         if mode == "PI" and not integral_held:
             self.integral += error * dt
 
@@ -1239,8 +1377,9 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         i_term = ki * self.integral
         u_requested = u_ff + p_term + i_term
 
-        direction = "HEAT" if u_requested >= 0 else "COOL"
-        pwm_magnitude = clamp_pwm(int(round(abs(u_requested))))
+        u_physical = compensated_pwm(u_requested, self.cooling_ratio) if mode in ("P", "PI") else u_requested
+        direction = "HEAT" if u_physical >= 0 else "COOL"
+        pwm_magnitude = clamp_pwm(int(round(abs(u_physical))))
         u_applied = pwm_magnitude if direction == "HEAT" else -pwm_magnitude
 
         self.current_pwm = pwm_magnitude
@@ -1251,7 +1390,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         return {
             "setpoint": setpoint,
             "error": error,
-            "u_ff": u_ff,
+            "u_ff": physical_ff,
             "kp": kp,
             "ki": ki,
             "dt": dt,
@@ -1279,6 +1418,11 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         plots, update the live readouts, write the PI log row.
         """
         self.accepted_line_count += 1
+        self.last_record_monotonic = time.monotonic()
+        if self.missing_reported:
+            self.last_rejected_label.setText("Records resumed; check run and restart control.")
+            self.missing_reported = False
+            self.mode_radios["MANUAL"].setChecked(True)
         self.accepted_count_label.setText(f"Accepted: {self.accepted_line_count}")
 
         # ----- 1. Raw CSV: the record exactly as the Arduino sent it -----
@@ -1306,9 +1450,17 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         # ----- 2. Open-loop / P-only / PI control -----
         pi = None
         setpoint = self.current_setpoint(time_s)
-        if self.control_mode in CONTROL_MODES and feedback_valid:
-            pi = self.compute_pi_control(time_s, feedback_c)
-            setpoint, error = pi["setpoint"], pi["error"]
+        if self.control_mode in CONTROL_MODES and feedback_valid and safety == "OK":
+            try:
+                pi = self.compute_pi_control(time_s, feedback_c)
+                setpoint, error = pi["setpoint"], pi["error"]
+            except ValueError as exc:
+                self.current_pwm = 0
+                self.send_current_settings()
+                self.mode_radios["MANUAL"].setChecked(True)
+                self.last_rejected_label.setText(f"Control stopped: {exc}")
+                self.last_rejected_label.setStyleSheet("color: red;")
+                error = setpoint - feedback_c
         else:
             # Manual mode still drives nothing off temperature, but we keep
             # computing/showing setpoint and error against the current
@@ -1318,8 +1470,11 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             # already forced the output off), and the next valid step starts
             # over at dt = 0 so the fault's duration isn't integrated.
             error = setpoint - feedback_c  # NaN when the feedback sensor is NaN
-            if not feedback_valid:
+            if not feedback_valid or safety != "OK":
                 self.previous_pi_time_s = None
+                if self.control_mode in CONTROL_MODES:
+                    self.current_pwm = 0
+                    self.send_current_settings()
 
         direction = DIRECTION_LABELS[heat_cool]
 
@@ -1367,6 +1522,16 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             "error_C": error,
             "feedback_C": record["raw"][feedback_field],
             "feedback_sensor": feedback_field,
+            "operating_state": safety,
+            "run_segment": "SINUSOID" if self.waveform_button.isChecked() else "STATIC",
+            "wave_mean_C": self.ta_spinbox.value(),
+            "wave_amplitude_C": self.tb_spinbox.value(),
+            "period_s": self.period_spinbox.value(),
+            "raw_ua_pwm": self.raw_ua_spinbox.value(),
+            "raw_ub_pwm": self.raw_ub_spinbox.value(),
+            "cooling_ratio": self.cooling_ratio,
+            "observed_signed_pwm": pwm if heat_cool else -pwm,
+            **{name: record["raw"][name] for name in ROD_FIELDNAMES},
         }
         if pi is not None:
             self.uff_label.setText(f"u_ff: {pi['u_ff']:+.1f}")
@@ -1432,7 +1597,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
             for pwm, direction in zip(self.pwms, self.directions)
         ]
         cool_pwms = [
-            pwm if direction == "COOL" else float("nan")
+            -pwm if direction == "COOL" else float("nan")
             for pwm, direction in zip(self.pwms, self.directions)
         ]
         self.pwm_heat_curve.setData(self.times, heat_pwms)

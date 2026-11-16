@@ -150,18 +150,14 @@ void readSerialCommands() {
       continue;  // line didn't look like "SET PWM <n> DIR <word>" - ignore it
     }
 
-    // Safety clamp: no matter what number was requested, never send the
-    // H-bridge a PWM value outside the valid 0-255 range.
-    currentPwm = constrain(requestedPwm, 0, 255);
-
     if (strcmp(directionWord, "HEAT") == 0) {
       currentDirectionIsHeat = true;
     } else if (strcmp(directionWord, "COOL") == 0) {
       currentDirectionIsHeat = false;
+    } else {
+      continue;
     }
-    // Any other direction word (a typo, etc.) is ignored: the PWM value above
-    // still gets applied, but the direction keeps its last known-good state
-    // rather than us guessing which pin to drive.
+    currentPwm = constrain(requestedPwm, 0, 255);
   }
 }
 
@@ -201,8 +197,8 @@ void driveHBridge() {
   int inactivePwmPin = currentDirectionIsHeat ? hBridgeCoolPwmPin : hBridgeHeatPwmPin;
   int commandedPwm = outputForcedOff() ? 0 : currentPwm;
 
-  analogWrite(activePwmPin, commandedPwm);
   analogWrite(inactivePwmPin, 0);
+  analogWrite(activePwmPin, commandedPwm);
 }
 
 // ---------------------------------------------------------------------
