@@ -839,7 +839,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
 
     def update_feedforward_label(self):
         if self.control_mode in ("RAW_AC", "RAW_HEAT"):
-            ua = self.raw_ua_spinbox.value() if self.control_mode == "RAW_HEAT" else 0.0
+            ua = self.raw_ua_spinbox.value()
             ub = self.raw_ub_spinbox.value()
             self.waveform_button.setEnabled(True)
             self.ff_info_label.setText(
@@ -1338,9 +1338,7 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
                 if self.waveform_start_s is None:
                     self.waveform_start_s = time_s
                 phase = 2 * math.pi * (time_s - self.waveform_start_s) / self.period_spinbox.value()
-                u_requested = self.raw_ub_spinbox.value() * math.sin(phase)
-                if mode == "RAW_HEAT":
-                    u_requested += self.raw_ua_spinbox.value()
+                u_requested = self.raw_ua_spinbox.value() + self.raw_ub_spinbox.value() * math.sin(phase)
             setpoint = float("nan")
             u_ff = 0.0
             kp = ki = dt = p_term = i_term = 0.0

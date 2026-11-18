@@ -91,9 +91,11 @@ class ControllerTests(unittest.TestCase):
     def test_diagnostic_modes_ignore_compensation(self):
         controller = FakeController()
         controller.control_mode = "RAW_AC"
+        controller.raw_ua_spinbox = Value(0.0)
         controller.compute_pi_control(75, 25)
         self.assertEqual(controller.commands[-1], (10, "COOL"))
         controller.control_mode = "RAW_HEAT"
+        controller.raw_ua_spinbox = Value(20.0)
         controller.compute_pi_control(75, 25)
         self.assertEqual(controller.commands[-1], (10, "HEAT"))
 
@@ -104,7 +106,7 @@ class ControllerTests(unittest.TestCase):
                 controller.control_mode = "RAW_AC"
                 controller.period_spinbox = Value(period)
                 controller.raw_ub_spinbox = Value(100.0)
-                controller.raw_ua_spinbox = Value(80.0)
+                controller.raw_ua_spinbox = Value(0.0)
                 for fraction, expected in ((0, (0, "HEAT")),
                                            (0.25, (100, "HEAT")),
                                            (0.5, (0, "HEAT")),
@@ -112,6 +114,16 @@ class ControllerTests(unittest.TestCase):
                                            (1, (0, "COOL"))):
                     controller.compute_pi_control(period * fraction, 25)
                     self.assertEqual(controller.commands[-1], expected)
+
+    def test_raw_ac_applies_mean_pwm(self):
+        controller = FakeController()
+        controller.control_mode = "RAW_AC"
+        controller.raw_ua_spinbox = Value(70.0)
+        controller.raw_ub_spinbox = Value(50.0)
+        for time_s, expected in ((0, (70, "HEAT")), (25, (120, "HEAT")),
+                                 (50, (70, "HEAT")), (75, (20, "HEAT"))):
+            controller.compute_pi_control(time_s, 25)
+            self.assertEqual(controller.commands[-1], expected)
 
     def test_record_validation(self):
         record = gui.parse_data_record("DATA,1.00,24,24,24,24,24,24,12,1,nan,OK")
@@ -193,7 +205,32 @@ class GuiIntegrationTests(unittest.TestCase):
                 finally:
                     window.close()
 
+<<<<<<< HEAD
     def test_out_of_range_feedforward_keeps_control(self):
+=======
+    def test_pwm_mean_is_visible_and_used(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(gui, "SerialReader", FakeReader), patch.object(gui, "DATA_DIR", Path(directory)):
+                window = gui.TemperaturePlotWindow("test", 9600)
+                try:
+                    window.mode_radios["RAW_AC"].setChecked(True)
+                    window.raw_ua_spinbox.setValue(70)
+                    window.raw_ub_spinbox.setValue(50)
+                    self.assertIn("20 to 120 PWM", window.ff_info_label.text())
+                    window.waveform_button.setChecked(True)
+                    for t in (0, 25, 50, 75):
+                        record = gui.parse_data_record(f"DATA,{t},24,24,24,24,24,24,0,0,nan,OK")
+                        window.on_measurement(record)
+                    self.assertIn("SET PWM 70 DIR HEAT", window.reader.commands)
+                    self.assertIn("SET PWM 120 DIR HEAT", window.reader.commands)
+                    self.assertIn("SET PWM 20 DIR HEAT", window.reader.commands)
+                    window.waveform_button.setChecked(False)
+                    self.assertEqual(window.reader.commands[-1], "SET PWM 0 DIR HEAT")
+                finally:
+                    window.close()
+
+    def test_out_of_range_feedforward_stops_control(self):
+>>>>>>> 812e882673f0246db9bb7f9aac12c095ec4c35d7
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(gui, "SerialReader", FakeReader), patch.object(gui, "DATA_DIR", Path(directory)):
                 window = gui.TemperaturePlotWindow("test", 9600)
