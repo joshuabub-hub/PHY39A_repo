@@ -29,7 +29,7 @@ Module 8 is the Module 7 six-thermistor rig driven with a sinusoidal base temper
 
 Select **Oscillate PWM ±** for `ub sin(2πt/τ)` or **Raw PWM heating** for `ua + ub sin(2πt/τ)`. For the symmetric diagnostic, enter `ub = 100 PWM` and choose a period of 100, 200, or 500 s; press **Start sinusoid**. The requested command ranges from −100 (cooling) to +100 (heating), without feedforward or cooling compensation. The PWM plot shows cooling as negative. Press **Stop sinusoid** to request zero PWM before changing the period. Both modes require `ub > 0`; heating-only also requires `ua > ub`. Heating-only is not temperature-regulated: adjust its settings based on measured TEC temperature, while respecting the cutoff.
 
-Feedforward-only interpolates the measured `pwm_steady_state.csv` curve, shifted so its zero-PWM point matches the entered room temperature. A target outside the measured curve stops control rather than extrapolating. P and PI optionally add feedforward to their heating-equivalent controller command. The negative combined command is multiplied by the fitted slope ratio `r = χh/χc` before saturation; negative feedforward is converted to the same units first so it is not compensated twice. Conditional integration checks the compensated candidate against saturation. Manual and diagnostic PWM bypass compensation.
+Feedforward-only interpolates the measured `pwm_steady_state.csv` curve, shifted so its zero-PWM point matches the entered room temperature. A target outside the measured curve is extrapolated linearly from the nearest measured segment (the PWM is still clamped to ±255). Control is stopped only by the over-temperature cutoff: if the TEC thermistor reads above 58 C, the GUI switches to Manual with PWM 0. P and PI optionally add feedforward to their heating-equivalent controller command. The negative combined command is multiplied by the fitted slope ratio `r = χh/χc` before saturation; negative feedforward is converted to the same units first so it is not compensated twice. Conditional integration checks the compensated candidate against saturation. Manual and diagnostic PWM bypass compensation.
 
 The Arduino still sends its original `DATA,time_s,tec_C,rod1_C,rod2_C,rod3_C,rod4_C,rod5_C,pwm,heat_cool,setpoint_C,safety` record; the GUI writes each accepted raw record unchanged to the raw CSV. The separate PI log records the GUI's mode, waveform parameters, controller output, ratio, observed signed PWM, and all rod readings. Its requested command is computed **after** the measurement and sent for a subsequent sample, while observed PWM is from the current Arduino record; they are not an atomic command/measurement pair. A new Arduino-origin combined record with millisecond timestamps and controller metadata has **not** been implemented. Malformed lines and missing records are reported; after more than three seconds without a record the GUI requests PWM zero. This is not a hardware communication watchdog and cannot stop output if the serial link has failed. The Arduino's independent TEC cutoff remains necessary.
 
@@ -124,6 +124,34 @@ For a settled pilot, plot measured T1 and two farther rod temperatures on the sa
 ## 3. Feedforward (steady-state inversion)
 
 The GUI's feedforward curve was calibrated on the TEC alone, before the current rod configuration; it is a controller input, not a measurement of this run. Enter the measured room temperature in the GUI. The attached rod adds side and axial loss, so expect extra droop in open loop.
+
+### Open-loop sinusoid: prediction vs. measurement
+
+Run `20261118_105010`, second sinusoid segment (started at 1139.8 s), feedforward-only (OPEN) with `Tset(t) = 40 + 16 sin(2πt/100 s)` °C, feedback and temperature from `tec_C`.
+
+| | u_a (PWM) | u_b (PWM) | Mean temperature (°C) | Oscillation amplitude (°C) | Temperature phase lag relative to set point (°) |
+|---|---|---|---|---|---|
+| Steady-state prediction | 31.3 | 31.0 | 40.0 | 16.0 | 0 |
+| Measured response | 31.2 | 31.4 | 40.9 | 4.03 | 79.0 |
+
+- **Prediction:** u_a = (T_a − T_room)/χ_h and u_b = T_b/χ_h, using the Module 4 heating susceptibility χ_h = 0.516 °C/PWM. T_room = 23.85 °C is the average of all six channels during the first 9 s of the log, when PWM was 0 (range 23.66–23.97 °C). The room-temperature entry in the GUI for this segment, inferred from the logged feedforward (the entry itself is not logged), was ≈ 23.8 °C, consistent with this value. The predicted temperature response follows from the same steady-state susceptibility: mean = T_room + χ_h·u_a = 23.85 + 0.516 × 31.3 = 40.0 °C, and oscillation amplitude = χ_h·u_b = 0.516 × 31.0 = 16.0 °C. A steady-state (quasi-static) model assumes the temperature follows the command instantly, so the predicted phase lag is 0°.
+- **Measured:** least-squares fit of `mean + A sin(ωt) + B cos(ωt)` at the commanded 100 s period over the 9 complete steady-state cycles, 1639.8–2539.8 s (1282 samples). Each of these cycles meets the settling criterion relative to the previous cycle (change in mean < 0.15 °C, amplitude < 2%, phase < 2°). The first five cycles (from 1139.8 s) were still warming (fitted means 33.5, 38.4, 39.8, 40.3, 40.6 °C) and are excluded. Per-cycle fits over the steady window range from 40.69 to 41.12 °C in mean (a slow upward drift of ≈ 0.4 °C over 9 cycles), 4.02–4.04 °C in amplitude, and 78.5–79.5° in lag. u_a and u_b are the mean and fundamental amplitude of the applied signed PWM (`u_applied`, range 0 to +63, so it never switched to cooling).
+- The feedforward command matches the prediction (u_a, u_b within about 1%), and the mean temperature comes within 1 °C of T_a. The oscillation does not: at τ = 100 s the TEC's thermal lag cuts the amplitude to 25% of the set-point amplitude and delays it by 79° (≈ 22 s). The quasi-static prediction holds for the mean but not for the oscillation at this period.
+- An earlier sinusoid segment in the same log (18.8–625 s) had only one cycle that met the settling criterion, and its GUI room entry was ≈ 22 °C, giving u_a ≈ 34.7 PWM and mean ≈ 42.3 °C. It is not used here.
+
+### P / PI control with the sinusoid
+
+All runs: `Tset(t) = 40 + 16 sin(2πt/τ)` °C, feedforward on, room entry 23.8 °C, feedback from `tec_C`. Requested amplitude is 16 °C. Each row is fitted at the commanded period over complete cycles that meet the settling criterion (change from the previous cycle in mean < 0.15 °C, amplitude < 2%, phase < 2°). RMS tracking error is `sqrt(mean((Tset − T_TEC)²))` over the same samples. PWM saturation is the fraction of samples with |applied PWM| = 255.
+
+| Period (s) | Trial | Kp (PWM/°C) | Ki (PWM/(°C·s)) | Sample intervals | Mean TEC temp (°C) | Amplitude ratio (fitted/requested) | Phase lag (°) | RMS tracking error (°C) | PWM saturation | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 100 | P only | 3 | 0 | 515.6–1115.6 s (6 cycles, 852 samples) | 40.2 | 0.554 (8.87 / 16 °C) | 58.0 (≈ 16 s) | 9.6 | 0% (applied −140 to +100) | Run `20261118_114015`. Settled from the 3rd cycle. Compared with open loop (0.25, 79°), amplitude ratio more than doubled, lag fell by 21°. Matches the linear prediction for Kp = 3 (0.56, 60°). TEC range 31.6–49.2 °C. |
+| 100 | Initial PI | | | | | | | | | |
+| 100 | PI tuning | | | | | | | | | |
+| 200 | PI with selected 100 s gains | | | | | | | | | |
+| 200 | PI retuning if needed | | | | | | | | | |
+| 300 | PI with selected 200 s gains | | | | | | | | | |
+| 300 | PI tuning if needed | | | | | | | | | |
 
 Conventions: PWM > 0 with direction HEAT drives pin 9 (heating); direction COOL drives pin 10 (cooling); the GUI shows applied PWM from the Arduino record and the sign from `heat_cool` (1 = heat). Confirm with TEC power off and a small command before energizing.
 

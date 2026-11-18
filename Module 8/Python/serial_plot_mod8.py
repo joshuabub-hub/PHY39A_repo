@@ -292,14 +292,23 @@ def load_susceptibility_curve(path):
 
 
 def interpolate_feedforward(t_set, room_c, curve):
-    """Invert the measured curve after shifting its zero-PWM temperature to room."""
+    """Invert the measured curve after shifting its zero-PWM temperature to room.
+
+    Inside the measured range this interpolates linearly between points.
+    Outside it, the first or last segment is extended linearly; the caller's
+    PWM clamp (0-255) limits the result, and the over-temperature cutoff
+    (WAVE_PEAK_LIMIT_C) is the only thing that stops control.
+    """
     delta = t_set - room_c
-    if not curve[0][0] <= delta <= curve[-1][0]:
-        raise ValueError("Setpoint is outside the measured feedforward range")
-    for (x0, y0), (x1, y1) in zip(curve, curve[1:]):
-        if x0 <= delta <= x1:
-            return y0 + (delta - x0) * (y1 - y0) / (x1 - x0)
-    raise ValueError("Setpoint is outside the measured feedforward range")
+    if delta <= curve[0][0]:
+        (x0, y0), (x1, y1) = curve[0], curve[1]
+    elif delta >= curve[-1][0]:
+        (x0, y0), (x1, y1) = curve[-2], curve[-1]
+    else:
+        (x0, y0), (x1, y1) = next(
+            (a, b) for a, b in zip(curve, curve[1:]) if a[0] <= delta <= b[0]
+        )
+    return y0 + (delta - x0) * (y1 - y0) / (x1 - x0)
 
 
 def compensated_pwm(command, ratio):
@@ -843,12 +852,13 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         ratio = self.m_heat / self.m_cool
         peak = self.ta_spinbox.value() + self.tb_spinbox.value()
         trough = self.ta_spinbox.value() - self.tb_spinbox.value()
-        try:
-            u_peak = interpolate_feedforward(peak, room, self.susceptibility_curve)
-            u_trough = interpolate_feedforward(trough, room, self.susceptibility_curve)
-            ff_text = f"uff(peak) = {u_peak:+.1f} PWM, uff(trough) = {u_trough:+.1f} PWM"
-        except ValueError:
-            ff_text = "Waveform extends outside the measured feedforward range."
+        u_peak = interpolate_feedforward(peak, room, self.susceptibility_curve)
+        u_trough = interpolate_feedforward(trough, room, self.susceptibility_curve)
+        ff_text = f"uff(peak) = {u_peak:+.1f} PWM, uff(trough) = {u_trough:+.1f} PWM"
+        lo = room + self.susceptibility_curve[0][0]
+        hi = room + self.susceptibility_curve[-1][0]
+        if trough < lo or peak > hi:
+            ff_text += f" (extrapolated beyond measured {lo:.1f}-{hi:.1f} C)"
         too_hot = peak > WAVE_PEAK_LIMIT_C
         self.waveform_button.setEnabled(not too_hot or self.waveform_button.isChecked())
         warning = f"\nPeak {peak:g} C exceeds the {WAVE_PEAK_LIMIT_C:g} C limit." if too_hot else ""
@@ -1447,10 +1457,29 @@ class TemperaturePlotWindow(QtWidgets.QMainWindow):
         tec_valid = math.isfinite(temperature_c)
         feedback_valid = tec_valid and math.isfinite(feedback_c)
 
-        # ----- 2. Open-loop / P-only / PI control -----
+        # ----- 2a. Over-temperature cutoff -----
+        # If the TEC-base thermistor reads above WAVE_PEAK_LIMIT_C, drop to
+        # Manual with PWM 0 (switching modes sends the zero command). Control
+        # stays off until you restart it; in Manual, any nonzero PWM is
+        # zeroed again on every record while still over the limit.
+        over_temp = tec_valid and temperature_c > WAVE_PEAK_LIMIT_C
+        if over_temp:
+            if self.control_mode != "MANUAL":
+                self.mode_radios["MANUAL"].setChecked(True)
+            elif self.current_pwm != 0:
+                self.current_pwm = 0
+                self._sync_manual_widgets(0, self.current_direction)
+                self.send_current_settings()
+            self.last_rejected_label.setText(
+                f"Over-temperature cutoff: TEC {temperature_c:.2f} C > "
+                f"{WAVE_PEAK_LIMIT_C:g} C; PWM off."
+            )
+            self.last_rejected_label.setStyleSheet("color: red;")
+
+        # ----- 2b. Open-loop / P-only / PI control -----
         pi = None
         setpoint = self.current_setpoint(time_s)
-        if self.control_mode in CONTROL_MODES and feedback_valid and safety == "OK":
+        if self.control_mode in CONTROL_MODES and feedback_valid and safety == "OK" and not over_temp:
             try:
                 pi = self.compute_pi_control(time_s, feedback_c)
                 setpoint, error = pi["setpoint"], pi["error"]

@@ -58,8 +58,13 @@ class ControllerTests(unittest.TestCase):
         self.assertAlmostEqual(gui.interpolate_feedforward(30.0, 30.0, curve), 0)
         self.assertAlmostEqual(gui.interpolate_feedforward(42.66, 30.0, curve), 23)
         self.assertAlmostEqual(gui.interpolate_feedforward(28.26, 30.0, curve), -14.5)
-        with self.assertRaises(ValueError):
-            gui.interpolate_feedforward(70, 30, curve)
+        # Outside the measured range the end segments are extended linearly.
+        hot = gui.interpolate_feedforward(70, 30, curve)
+        self.assertGreater(hot, 45)
+        x0, y0 = curve[-2]
+        x1, y1 = curve[-1]
+        self.assertAlmostEqual(hot, y0 + (40 - x0) * (y1 - y0) / (x1 - x0))
+        self.assertLess(gui.interpolate_feedforward(5, 30, curve), -115)
 
     def test_cooling_compensation_and_anti_windup(self):
         controller = FakeController()
@@ -188,7 +193,7 @@ class GuiIntegrationTests(unittest.TestCase):
                 finally:
                     window.close()
 
-    def test_out_of_range_feedforward_stops_control(self):
+    def test_out_of_range_feedforward_keeps_control(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(gui, "SerialReader", FakeReader), patch.object(gui, "DATA_DIR", Path(directory)):
                 window = gui.TemperaturePlotWindow("test", 9600)
@@ -198,12 +203,35 @@ class GuiIntegrationTests(unittest.TestCase):
                     window.mode_radios["OPEN"].setChecked(True)
                     record = gui.parse_data_record("DATA,1.00,24,24,24,24,24,24,0,0,nan,OK")
                     window.on_measurement(record)
-                    self.assertEqual(window.control_mode, "MANUAL")
-                    self.assertEqual(window.reader.commands[-1], "SET PWM 0 DIR COOL")
-                    self.assertIn("outside the measured", window.last_rejected_label.text())
+                    self.assertEqual(window.control_mode, "OPEN")
+                    self.assertIn("DIR HEAT", window.reader.commands[-1])
+                    self.assertNotEqual(window.reader.commands[-1], "SET PWM 0 DIR HEAT")
                 finally:
                     window.close()
 
+    def test_over_temperature_cuts_pwm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(gui, "SerialReader", FakeReader), patch.object(gui, "DATA_DIR", Path(directory)):
+                window = gui.TemperaturePlotWindow("test", 9600)
+                try:
+                    window.setpoint_spinbox.setValue(50)
+                    window.mode_radios["P"].setChecked(True)
+                    record = gui.parse_data_record("DATA,1.00,30,30,30,30,30,30,0,0,nan,OK")
+                    window.on_measurement(record)
+                    self.assertIn("DIR HEAT", window.reader.commands[-1])
+                    record = gui.parse_data_record("DATA,2.00,58.5,30,30,30,30,30,40,1,nan,OK")
+                    window.on_measurement(record)
+                    self.assertEqual(window.control_mode, "MANUAL")
+                    self.assertEqual(window.reader.commands[-1], "SET PWM 0 DIR COOL")
+                    self.assertIn("Over-temperature", window.last_rejected_label.text())
+                    # Manual PWM is forced back to 0 while still over the limit.
+                    window.current_pwm = 100
+                    window.current_direction = "HEAT"
+                    record = gui.parse_data_record("DATA,3.00,58.2,30,30,30,30,30,100,1,nan,OK")
+                    window.on_measurement(record)
+                    self.assertEqual(window.reader.commands[-1], "SET PWM 0 DIR HEAT")
+                finally:
+                    window.close()
 
 if __name__ == "__main__":
     unittest.main()
