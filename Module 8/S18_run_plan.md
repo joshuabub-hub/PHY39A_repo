@@ -4,6 +4,46 @@ This plan organizes the remaining S18.1-S18.4 work from the Module 8 README
 and assignment checklist. It is for the raw-PWM experiment; the separate
 Angstrom open-loop/P/PI procedure in `README.md` is a different experiment.
 
+## Status update (2026-11-19)
+
+The new run pair is `data/raw_mod8_20261119_102636.csv` and
+`data/pi_log_mod8_20261119_102636.csv`. The experimenter reports room
+temperature was approximately 22.4 °C; treat this as an estimate.
+
+| Run | Finding | Action |
+|---|---|---|
+| Zero-centered, 200 s, `ua=0`, `ub=50` | Five consecutive settled cycles are available in the recorded interval 2905.86-3904.98 s (about 5 periods). | No repeat needed for the S18.3 experimental fit. |
+| Zero-centered, 300 s, `ua=0`, `ub=50` | Seven complete cycles were recorded, but only the final cycle-to-cycle comparison met the settling checks. | Repeat or extend. Record until the cycle checks show at least five consecutive settled cycles. |
+| Zero-centered, 100 s, `ua=0`, `ub=50` | Five complete cycles were recorded; none of the cycle-to-cycle comparisons met all settling checks. | Repeat or extend. Record until the cycle checks show at least five consecutive settled cycles. |
+| Positive-only, 100 s | Attempts at `ua=55, ub=50` and `ua=55, ub=40` did not provide five settled cycles. The TEC reading reached about 58 °C. | Do not repeat these settings. Reassess the positive-only drive with the instructor/operator and use a lower mean and/or amplitude with close temperature monitoring. No safe positive-only setting has been established by these logs. |
+
+The 200 s five-cycle fit and the model calculations are documented in
+`S18_results_20261119.md`. The reported room temperature is not a calibrated
+measurement, and the 200 s run's mean-minus-room value should be presented as
+approximate.
+
+### Runs still needed
+
+1. **300 s zero-centered:** `ua=0`, initially `ub=50`; retain this amplitude
+   only if temperatures remain comfortably within the limits. Extend the run
+   beyond the previous 7.5-cycle recording until at least five consecutive
+   complete cycles pass the settling checks. Reduce `ub` and record the change
+   if needed for safety.
+2. **100 s zero-centered:** `ua=0`, initially `ub=50`; extend beyond the prior
+   5.9-cycle recording until at least five consecutive complete cycles pass
+   the settling checks. Reduce `ub` and record the change if needed.
+3. **100 s positive-only:** do not reuse `ua=55` with either `ub=50` or
+   `ub=40`. First review the near-cutoff results with the instructor/operator.
+   If approved to proceed, choose a lower positive-only mean and/or amplitude,
+   keep `ua > ub` and `ua + ub <= 255`, and use a short monitored pilot before
+   attempting a settled run. Stop well before either thermal limit; there is
+   no verified-safe numeric setting in the present data. If `ub` differs from
+   the zero-centered baseline, record the change and account for it in the
+   comparison.
+
+The common-bath check and S18.2's required single complete Arduino record
+remain outstanding unless completed and documented separately.
+
 ## Before running
 
 ### S18.1: verify channels, placement, and safety
@@ -49,14 +89,7 @@ starting condition before each run. Monitor TEC and T1 continuously.
 | 1 | Zero-centered sinusoidal PWM: `ua = 0`, `ub = 50 PWM counts`, `period = 300 s` | Initial safety check at the longest required period. Reduce `ub` if needed to maintain safe measured temperatures; record the selected value. |
 | 2 | Zero-centered: `ua = 0`, same selected `ub` as Run 1, `period = 200 s` | Keep amplitude fixed. |
 | 3 | Zero-centered: `ua = 0`, same selected `ub`, `period = 100 s` | Keep amplitude fixed. This is the S18.4 baseline. |
-| 4 | Positive-only sinusoidal PWM: `period = 100 s`, same `ub` as Run 3, choose `ua > ub` and `ua + ub <= 255` | Keep the requested PWM positive and unclipped. Adjust `ua` toward the intended mean temperature only while monitoring safety. Record any change to `ub` and account for it in the comparison. |
-
-For Run 4, `ua = ub + 5 PWM counts` is only a conservative initial suggestion
-for a small positive minimum command, not a validated safe setting. For
-example, if the selected `ub` is 50, this gives `ua = 55` and a requested range
-of +5 to +105 PWM. Do not reuse the previous `ua = 70, ub = 50` settings:
-the 2026-11-16 log recorded 135 cutoff-state samples and a measured TEC
-temperature of 60.29 °C with those settings.
+| 4 | Positive-only sinusoidal PWM: `period = 100 s`, same `ub` as Run 3 if approved safe, choose `ua > ub` and `ua + ub <= 255` | Proceed only after reviewing the near-cutoff results with the instructor/operator. No positive-only parameter has been verified safe. Do not reuse `ua = 55` with `ub = 50` or `ub = 40`; those runs reached about 58 °C at the TEC. If approved, use a lower mean and/or amplitude, pilot cautiously, and record any settings change for the comparison. |
 
 The assignment suggests bringing the positive-only mean near 40 °C, but safety
 takes priority. Use a lower mean or reduce the amplitude if needed; a requested
